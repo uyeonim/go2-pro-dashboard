@@ -21,7 +21,8 @@ Go2 Air/Pro는 공식 SDK가 열려 있지 않아서, 앱과 같은 WebRTC 방�
 | `sensors.py` | 터미널에 센서값 출력 + `logs/`에 CSV 저장 |
 | `camera.py` | OpenCV 창으로 카메라 보기, 사진(`s`)·녹화(`r`) → `captures/` |
 | `대시보드_실행.bat` | 더블클릭으로 대시보드 실행 |
-| `공개주소_실행.bat` | 대시보드 + Cloudflare 공개 주소를 한 번에 실행 |
+| `공개주소_실행.bat` | 대시보드 + 공개 주소(Tailscale 고정 / 없으면 Cloudflare 임시)를 한 번에 실행 |
+| `web/demo.js`, `web/config.js` | 고정 주소용 브라우저 데모와 설정 |
 | `데모_실행.bat` | 로봇 없이 데모 모드로 실행 |
 | `ros2/` | WSL ROS2 SLAM 설치·실행·지도 저장 스크립트 |
 
@@ -53,12 +54,24 @@ UNITREE_AES_128_KEY=<32자리 16진수>
 .venv\Scripts\python camera.py         # 카메라 창
 ```
 
-## 외부에서 보기 (Cloudflare Quick Tunnel)
+## 외부에서 보기 — 고정 주소
 
-[`cloudflared`](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/)를 설치한 뒤 `공개주소_실행.bat`를 실행하면 `https://xxxx.trycloudflare.com` 주소가 나옵니다.
+**https://uyeonim.github.io/go2-pro-dashboard/** (GitHub Pages, 항상 열림)
 
-- 링크를 아는 사람은 **누구나** 카메라 영상을 보고, 사진·녹화 파일을 내려받고, 녹화를 시작할 수 있으니 필요한 사람에게만 공유하세요.
-- 실행할 때마다 주소가 바뀌고, 이 PC·대시보드·로봇이 켜져 있을 때만 보입니다.
+- 노트북 대시보드가 켜져 있으면 → **실제 화면**으로 이동
+- 꺼져 있으면 → 그 자리에서 **브라우저 데모**(가짜 카메라·센서·LiDAR, 화면에 DEMO 표시)
+
+### 노트북 쪽 설정 (처음 한 번, Tailscale Funnel)
+
+1. https://tailscale.com 에 가입하고 Windows용 Tailscale을 설치·로그인
+2. `공개주소_실행.bat` 실행 → 처음에는 Funnel 허용 안내 링크가 나오니 열어서 허용
+3. 나온 `https://노트북이름.xxxx.ts.net` 주소를 [web/config.js](web/config.js)의 `GO2_LIVE_URL`에 넣고 push
+4. 이후에는 `공개주소_실행.bat`만 실행하면 고정 주소가 실제 화면으로 이어집니다
+
+Tailscale이 없으면 `공개주소_실행.bat`이 예전처럼 Cloudflare 임시 주소(`https://xxxx.trycloudflare.com`, 실행할 때마다 바뀜)를 엽니다.
+
+- 공개 주소로 열 때는 `.env`에 **`DASHBOARD_PASSWORD`**를 넣어 실제 화면을 비밀번호로 잠그세요. 데모는 잠금 없이 열립니다.
+- 잠금이 없으면 링크를 아는 사람은 **누구나** 카메라 영상을 보고, 녹화를 시작하고, 파일을 내려받을 수 있습니다.
 
 ## 지도 만들기 (ROS2 SLAM)
 

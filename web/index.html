@@ -27,6 +27,12 @@
   #pill.bad .ic{background:var(--bad)}
   #pill.busy .ic{background:none;border:2px solid var(--warn);border-top-color:transparent;animation:spin .8s linear infinite}
 
+  /* 데모 안내 띠 */
+  #modebar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:12px 16px 0;padding:10px 14px;border-radius:10px;
+           font-size:13px;background:color-mix(in srgb,var(--accent) 12%,var(--panel));border:1px solid color-mix(in srgb,var(--accent) 40%,transparent)}
+  #modebar b{color:#cfe0ff}
+  #modebar .btn{margin-left:auto}
+
   /* 경고 띠 */
   #alerts{display:flex;flex-direction:column;gap:6px;padding:0 16px}
   #alerts:not(:empty){padding-top:12px}
@@ -107,6 +113,11 @@
   <span id="demotag" class="demo-tag hidden">DEMO · 가짜 데이터</span>
   <span id="pill" class="busy"><span class="ic"></span><span id="pilltext">시작 중…</span></span>
 </header>
+<div id="modebar" class="hidden">
+  <span><b>지금은 데모 화면이에요.</b> 실제 로봇이 아니라 브라우저가 만든 가짜 데이터예요.
+    노트북과 로봇이 켜져 있으면 이 주소로 들어올 때 실제 화면으로 이동해요.</span>
+  <button class="btn" id="b-recheck">실제 화면 다시 확인</button>
+</div>
 <div id="alerts"></div>
 
 <main>
@@ -174,10 +185,66 @@
 <footer>로봇은 한 번에 하나만 연결돼요 (폰 앱은 꺼 두세요) · 영상 mp4는 내려받아서 재생하세요</footer>
 <div id="toast"></div>
 
+<!-- 실행 방식 설정: dashboard.py가 띄우면 live, GitHub Pages(고정 주소)면 auto -->
+<script src="config.js"></script>
+<script src="demo.js"></script>
 <script>
 const $ = id => document.getElementById(id);
 function set(id, v){ const e=$(id); if(e) e.textContent = (v===undefined||v===null)?'–':v; }
 function toast(msg){ const t=$('toast'); t.textContent=msg; t.classList.add('on'); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove('on'), 2600); }
+
+// ── 실행 방식: live(노트북 서버) / demo(브라우저 가짜 데이터) / auto(고정 주소 입구) ──
+const MODE_CFG = window.GO2_MODE || 'live';
+const LIVE_URL = (window.GO2_LIVE_URL || '').replace(/\/+$/, '');
+
+// 실제 서버(dashboard.py)에서 데이터를 받는 방법
+const LiveAPI = {
+  async data(){
+    const r = await fetch('/data', {cache:'no-store'});
+    if(r.status === 401){ location.href = '/login'; throw new Error('login'); }  // 비밀번호 잠금
+    return r.json();
+  },
+  lidar: async () => (await fetch('/lidar', {cache:'no-store'})).json(),
+  snapshot: async () => (await fetch('/snapshot', {method:'POST'})).json(),
+  recStart: async () => (await fetch('/record/start', {method:'POST'})).json(),
+  recStop: async () => (await fetch('/record/stop', {method:'POST'})).json(),
+  recordings: async () => (await fetch('/recordings', {cache:'no-store'})).json(),
+  trailClear: async () => (await fetch('/trail/clear', {method:'POST'})).json(),
+  // 서버가 밀어 보내는 영상 스트림을 읽어서 표시 (3초간 새 프레임이 없으면 다시 연결)
+  startCamera(show){
+    let ctrl = null, last = Date.now();
+    const findMarker = (buf, b2, from) => { for(let i=from; i<buf.length-1; i++) if(buf[i]===0xFF && buf[i+1]===b2) return i; return -1; };
+    async function loop(){
+      ctrl = new AbortController(); last = Date.now();
+      try{
+        const r = await fetch('/video?t='+Date.now(), {signal: ctrl.signal, cache:'no-store'});
+        const reader = r.body.getReader();
+        let buf = new Uint8Array(0);
+        while(true){
+          const {value, done} = await reader.read();
+          if(done) break;
+          const nb = new Uint8Array(buf.length + value.length); nb.set(buf); nb.set(value, buf.length); buf = nb;
+          let s = findMarker(buf, 0xD8, 0), lastJpg = null;
+          while(s >= 0){
+            const e = findMarker(buf, 0xD9, s+2);
+            if(e < 0) break;
+            lastJpg = buf.slice(s, e+2);         // 한 번에 여러 장이 오면 가장 최신 것만 표시
+            buf = buf.slice(e+2);
+            s = findMarker(buf, 0xD8, 0);
+          }
+          if(lastJpg){ last = Date.now(); show(new Blob([lastJpg], {type:'image/jpeg'})); }
+          if(buf.length > 4e6) buf = new Uint8Array(0);
+        }
+      }catch(e){}
+      setTimeout(loop, 800);
+    }
+    // 서버는 최소 1초마다 프레임을 보내므로 3초간 없으면 스트림이 멈춘 것
+    setInterval(() => { if(Date.now() - last > 3000 && ctrl) ctrl.abort(); }, 1000);
+    loop();
+  },
+};
+let api = LiveAPI;
+let MODE = 'live';
 
 // ── 상태 ──
 let D = null;          // 마지막 /data 응답
@@ -195,12 +262,13 @@ function ov(id, kind, title, detail){
   if(e.dataset.h !== html){ e.innerHTML = html; e.dataset.h = html; }
   e.className = 'ov ' + (kind==='spin' ? '' : kind);
 }
+const CARDS = ['ov-cam','ov-map','ov-sen'];
 function pill(cls, text){ $('pill').className = cls; $('pilltext').textContent = text; }
 
 function phaseInfo(d){
   const n = d.attempt > 1 ? ` (${d.attempt}번째 시도)` : '';
   switch(d.phase){
-    case 'connecting':   return {pill:'로봇에 연결 중…'+n, title:'로봇에 연결하는 중', detail:'로봇과 암호 키를 주고받고 있어요. 보통 몇 초면 돼요.'};
+    case 'connecting':   return {pill:'로봇에 연결 중…'+n, title:'로봇에 연결하는 중', detail: d.demo ? '데모: 가상 로봇에 연결하고 있어요.' : '로봇과 암호 키를 주고받고 있어요. 보통 몇 초면 돼요.'};
     case 'retrying':     return {pill:'연결 실패 · 곧 다시 시도'+n, title:'로봇에 연결하지 못했어요', detail:(d.error||'')+' 5초 뒤 자동으로 다시 시도해요.'};
     case 'reconnecting': return {pill:'연결이 끊겨 다시 연결 중…', title:'연결이 끊겨서 다시 연결하는 중', detail:(d.error?d.error+' · ':'')+'화면 값은 끊기기 전 마지막 값이에요.'};
     default: return null;
@@ -213,21 +281,20 @@ function freshness(id, age, waiting, label){
 }
 
 function render(){
-  const cards = ['ov-cam','ov-map','ov-sen'];
   if(serverUp === false){
     pill('bad', '대시보드 서버 꺼짐');
-    cards.forEach(c => ov(c, 'bad', '대시보드 서버에 연결할 수 없어요', 'PC에서 dashboard.py가 켜져 있는지 확인하세요. 켜지면 자동으로 다시 붙어요.'));
+    CARDS.forEach(c => ov(c, 'bad', '대시보드 서버에 연결할 수 없어요', 'PC에서 dashboard.py가 켜져 있는지 확인하세요. 켜지면 자동으로 다시 붙어요.'));
     renderAlerts([{lv:'bad', msg:'대시보드 서버에 연결할 수 없어요'}]);
     return;
   }
-  if(!D){ pill('busy', '대시보드 불러오는 중…'); cards.forEach(c => ov(c, 'spin', '불러오는 중')); return; }
+  if(!D){ pill('busy', '대시보드 불러오는 중…'); CARDS.forEach(c => ov(c, 'spin', '불러오는 중')); return; }
   $('demotag').classList.toggle('hidden', !D.demo);
 
   const alerts = [];
   const p = phaseInfo(D);
   if(p){
     pill(D.phase==='retrying' ? 'bad' : 'busy', p.pill);
-    cards.forEach(c => ov(c, D.phase==='retrying' ? 'bad' : 'spin', p.title, p.detail));
+    CARDS.forEach(c => ov(c, D.phase==='retrying' ? 'bad' : 'spin', p.title, p.detail));
     if(D.phase === 'reconnecting') alerts.push({lv:'bad', msg:'로봇 연결이 끊겼어요 — 자동으로 다시 연결하는 중'});
   } else {
     pill('ok', D.demo ? '연결됨 (데모)' : '연결됨');
@@ -270,8 +337,7 @@ function renderTemps(m){
 }
 async function tick(){
   try{
-    const r = await fetch('/data', {cache:'no-store'});
-    D = await r.json();
+    D = await api.data();
     serverUp = true;
     const d = D;
     if(d.pos){
@@ -306,67 +372,35 @@ async function tick(){
     }
     renderRecBtn(d.recording);
   }catch(e){
-    serverUp = false;
+    if(e.message !== 'login') serverUp = false;
   }
   render();
 }
-setInterval(tick, 250);
-tick();
 
-// ── 카메라: 서버가 밀어 보내는 스트림을 직접 읽어서 표시 (3초간 새 프레임이 없으면 다시 연결) ──
+// ── 카메라 (live: 서버 스트림 / demo: 브라우저 그림) ──
 const cam = $('cam');
-let camCtrl = null, camUrl = null, lastFrameAt = 0, frames = 0, fpsT = Date.now();
-function showFrame(bytes){
-  const url = URL.createObjectURL(new Blob([bytes], {type:'image/jpeg'}));
+let camUrl = null, frames = 0, fpsT = Date.now();
+function showFrame(blob){
+  const url = URL.createObjectURL(blob);
   cam.src = url;
   if(camUrl) URL.revokeObjectURL(camUrl);
   camUrl = url;
-  lastFrameAt = Date.now();
   frames++;
 }
-function findMarker(buf, b2, from){   // JPEG 시작(FF D8) / 끝(FF D9) 찾기
-  for(let i=from; i<buf.length-1; i++) if(buf[i]===0xFF && buf[i+1]===b2) return i;
-  return -1;
+function startFpsLabel(){
+  setInterval(() => {
+    const fps = frames / ((Date.now() - fpsT)/1000);
+    $('camage').textContent = (D && D.connected && D.video_age !== null && D.video_age < 2) ? `실시간 · ${fps.toFixed(0)}fps` : '';
+    frames = 0; fpsT = Date.now();
+  }, 1000);
 }
-async function camStream(){
-  camCtrl = new AbortController();
-  lastFrameAt = Date.now();
-  try{
-    const r = await fetch('/video?t='+Date.now(), {signal: camCtrl.signal, cache:'no-store'});
-    const reader = r.body.getReader();
-    let buf = new Uint8Array(0);
-    while(true){
-      const {value, done} = await reader.read();
-      if(done) break;
-      const nb = new Uint8Array(buf.length + value.length); nb.set(buf); nb.set(value, buf.length); buf = nb;
-      let s = findMarker(buf, 0xD8, 0), last = null;
-      while(s >= 0){
-        const e = findMarker(buf, 0xD9, s+2);
-        if(e < 0) break;
-        last = buf.slice(s, e+2);           // 한 번에 여러 장이 오면 가장 최신 것만 표시
-        buf = buf.slice(e+2);
-        s = findMarker(buf, 0xD8, 0);
-      }
-      if(last) showFrame(last);
-      if(buf.length > 4e6) buf = new Uint8Array(0);
-    }
-  }catch(e){}
-  setTimeout(camStream, 800);
-}
-setInterval(() => {   // 감시: 서버는 최소 1초마다 프레임을 보내므로 3초간 없으면 스트림이 멈춘 것
-  if(Date.now() - lastFrameAt > 3000 && camCtrl){ camCtrl.abort(); }
-  const fps = frames / ((Date.now() - fpsT)/1000);
-  $('camage').textContent = (D && D.connected && D.video_age !== null && D.video_age < 2) ? `실시간 · ${fps.toFixed(0)}fps` : '';
-  frames = 0; fpsT = Date.now();
-}, 1000);
-camStream();
 
 // ── 버튼: 사진 / 녹화 / 경로 지우기 ──
 $('b-snap').onclick = async () => {
-  const r = await fetch('/snapshot', {method:'POST'}); const j = await r.json();
+  const j = await api.snapshot();
   if(!j.ok) return toast(j.error || '사진 저장 실패');
   const a = document.createElement('a'); a.href = j.url; a.download = j.name; a.click();
-  toast(`사진 저장: captures/${j.name}`);
+  toast(MODE==='demo' ? '데모 화면을 사진으로 저장했어요' : `사진 저장: captures/${j.name}`);
 };
 function renderRecBtn(rec){
   const b = $('b-rec');
@@ -377,16 +411,18 @@ function renderRecBtn(rec){
 }
 $('b-rec').onclick = async () => {
   const active = D && D.recording && D.recording.active;
-  const j = await (await fetch(active ? '/record/stop' : '/record/start', {method:'POST'})).json();
+  const j = await (active ? api.recStop() : api.recStart());
+  if(!j.ok) return toast(j.error || '녹화를 시작하지 못했어요');
   toast(active ? `녹화 저장됨: recordings/${j.name}` : '녹화를 시작했어요 (영상 + 센서 CSV)');
   if(active) setTimeout(loadRecordings, 600);
   tick();
 };
-$('b-trail').onclick = async () => { await fetch('/trail/clear', {method:'POST'}); toast('경로를 지웠어요'); };
+$('b-trail').onclick = async () => { await api.trailClear(); toast('경로를 지웠어요'); };
 
 async function loadRecordings(){
   try{
-    const list = await (await fetch('/recordings', {cache:'no-store'})).json();
+    const list = await api.recordings();
+    if(list === null){ $('reclist').innerHTML = '<li class="empty">데모에서는 녹화 파일이 없어요. 실제 대시보드에서 녹화할 수 있어요.</li>'; return; }
     $('reclist').innerHTML = list.length ? list.map(r => {
       const t = r.name.replace(/^(\d{4})(\d\d)(\d\d)_(\d\d)(\d\d)(\d\d)$/, '$2/$3 $4:$5:$6');
       const links = r.files.map(f => `<a href="${f.url}" download>${f.name.endsWith('.mp4')?'영상':'센서 CSV'} (${f.kb>1024?(f.kb/1024).toFixed(1)+'MB':f.kb+'KB'})</a>`).join(' · ');
@@ -394,7 +430,6 @@ async function loadRecordings(){
     }).join('') : '<li class="empty">아직 녹화한 파일이 없어요.</li>';
   }catch(e){}
 }
-loadRecordings();
 
 // ── LiDAR 지도: 로봇을 가운데 두고 위에서 본 모습 (반경 4m) + 지나온 경로 ──
 const cv = $('map'), cx = cv.getContext('2d');
@@ -431,7 +466,7 @@ function drawMap(L){
 }
 async function lidarTick(){
   try{
-    const L = await (await fetch('/lidar', {cache:'no-store'})).json();
+    const L = await api.lidar();
     drawMap(L);
     const parts = [];
     if(L.points.length && D && D.connected) parts.push(`${L.points.length}점`);
@@ -439,8 +474,47 @@ async function lidarTick(){
     $('lidarinfo').textContent = parts.join(' · ');
   }catch(e){}
 }
-setInterval(lidarTick, 500);
-lidarTick();
+
+// ── 고정 주소 입구: 노트북의 실제 대시보드가 켜져 있으면 그리로 이동 ──
+async function liveAlive(){
+  if(!LIVE_URL) return false;
+  try{
+    const c = new AbortController(), t = setTimeout(() => c.abort(), 3000);
+    const r = await fetch(LIVE_URL + '/health', {signal: c.signal, cache:'no-store'});
+    clearTimeout(t);
+    return r.ok;
+  }catch(e){ return false; }
+}
+$('b-recheck').onclick = async () => {
+  if(!LIVE_URL) return toast('노트북 고정 주소가 아직 설정되지 않았어요 (web/config.js)');
+  toast('노트북 대시보드를 확인하는 중…');
+  if(await liveAlive()) location.replace(LIVE_URL + '/');
+  else toast('노트북이나 로봇이 꺼져 있어요. 데모를 계속 보여줄게요.');
+};
+
+function start(){
+  setInterval(tick, 250); tick();
+  setInterval(lidarTick, 500); lidarTick();
+  api.startCamera(showFrame); startFpsLabel();
+  loadRecordings();
+}
+
+(async function boot(){
+  if(MODE_CFG === 'auto'){
+    pill('busy', '실제 대시보드 확인 중…');
+    CARDS.forEach(c => ov(c, 'spin', '노트북 대시보드가 켜져 있는지 확인하는 중', '켜져 있으면 실제 화면으로, 꺼져 있으면 데모로 보여줘요.'));
+    if(await liveAlive()){ location.replace(LIVE_URL + '/'); return; }
+    MODE = 'demo';
+  } else if(MODE_CFG === 'demo'){
+    MODE = 'demo';
+  }
+  if(MODE === 'demo'){
+    api = window.Go2Demo;
+    $('modebar').classList.remove('hidden');
+    $('b-rec').disabled = true; $('b-rec').title = '데모에서는 녹화할 수 없어요';
+  }
+  start();
+})();
 </script>
 </body>
 </html>

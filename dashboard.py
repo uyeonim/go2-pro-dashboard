@@ -11,16 +11,19 @@
 import argparse
 import asyncio
 import csv
+import hashlib
+import hmac
 import logging
 import math
 import os
 import threading
 import time
 import webbrowser
+from datetime import timedelta
 
 import cv2
 import numpy as np
-from flask import Flask, Response, jsonify, send_from_directory
+from flask import Flask, Response, jsonify, redirect, request, send_from_directory, session
 
 from sensors import make_conn  # import 시 .env도 읽음
 from unitree_webrtc_connect import RTC_TOPIC
@@ -28,6 +31,8 @@ from unitree_webrtc_connect import RTC_TOPIC
 # 접속 정보는 .env에서 읽음 (sensors.py의 load_env). 코드에 키를 적지 않음.
 DEFAULT_IP = os.environ.get("UNITREE_ROBOT_IP")
 DEFAULT_KEY = os.environ.get("UNITREE_AES_128_KEY")
+PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")       # 비우면 잠금 없음
+PAGES_ORIGIN = os.environ.get("DASHBOARD_PAGES_ORIGIN", "https://uyeonim.github.io")  # 고정 주소 입구 (GitHub Pages)
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 REC_DIR = os.path.join(BASE, "recordings")   # 녹화(영상 + 센서 CSV)
@@ -68,6 +73,61 @@ _latest_t = [0.0]  # 마지막 프레임 받은 시각
 
 logging.getLogger("werkzeug").setLevel(logging.ERROR)  # /data 요청 로그 숨김
 app = Flask(__name__, static_folder="web", static_url_path="")
+# 로그인 쿠키 서명용 (비밀번호가 바뀌면 기존 로그인은 풀림), 로그인은 30일 유지
+app.secret_key = hashlib.sha256(f"go2-dashboard:{PASSWORD}:{DEFAULT_KEY}".encode()).digest()
+app.permanent_session_lifetime = timedelta(days=30)
+OPEN_PATHS = {"/health", "/login", "/config.js", "/favicon.ico"}   # 잠금 없이 열리는 주소
+
+LOGIN_PAGE = """<!doctype html><html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Go2 대시보드 로그인</title>
+<style>body{{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0e1116;color:#e6ebf2;
+font-family:'Segoe UI','Malgun Gothic',system-ui,sans-serif}}form{{background:#161b24;border:1px solid #2a3340;border-radius:14px;
+padding:28px;width:min(340px,90vw)}}h1{{font-size:18px;margin:0 0 6px}}p{{color:#8b97a7;font-size:13px;margin:0 0 18px}}
+input{{width:100%;box-sizing:border-box;padding:11px 12px;border-radius:8px;border:1px solid #2a3340;background:#0e1116;color:#e6ebf2;
+font-size:15px}}button{{width:100%;margin-top:12px;padding:11px;border:0;border-radius:8px;background:#4c8dff;color:#fff;
+font-size:15px;font-weight:700;cursor:pointer}}.err{{color:#ff8fa3;font-size:13px;margin-top:10px}}</style></head>
+<body><form method="post"><h1>Unitree Go2 · 실시간 대시보드</h1><p>실제 로봇 화면은 비밀번호가 필요해요.</p>
+<input type="password" name="pw" placeholder="비밀번호" autofocus required><button>들어가기</button>{err}</form></body></html>"""
+
+
+@app.before_request
+def require_login():
+    """DASHBOARD_PASSWORD가 있으면 로그인한 사람만 실제 화면/데이터를 볼 수 있음."""
+    if not PASSWORD or request.path in OPEN_PATHS or session.get("ok"):
+        return None
+    if request.path == "/":
+        return redirect("/login")
+    return jsonify({"error": "login required"}), 401
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if not PASSWORD:
+        return redirect("/")
+    if request.method == "POST":
+        if hmac.compare_digest(request.form.get("pw", ""), PASSWORD):
+            session.permanent = True
+            session["ok"] = True
+            return redirect("/")
+        return LOGIN_PAGE.format(err='<div class="err">비밀번호가 달라요.</div>'), 403
+    return LOGIN_PAGE.format(err="")
+
+
+@app.route("/config.js")
+def config_js():
+    """노트북 서버로 열면 항상 실제(live) 모드 — web/config.js(고정 주소용)를 덮어씀."""
+    r = Response("window.GO2_MODE = 'live';\n", mimetype="application/javascript")
+    r.headers["Cache-Control"] = "no-store"
+    return r
+
+
+@app.route("/health")
+def health():
+    """고정 주소 입구(GitHub Pages)가 '노트북 대시보드가 켜져 있나'를 확인하는 곳. 켜짐 여부만 알려줌."""
+    r = jsonify({"ok": True, "robot_connected": state["connected"]})
+    r.headers["Access-Control-Allow-Origin"] = PAGES_ORIGIN
+    r.headers["Cache-Control"] = "no-store"
+    return r
 
 
 def log(msg):
