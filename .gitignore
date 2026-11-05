@@ -6,6 +6,9 @@ make_doc.py
 # 실행 결과물
 logs/
 captures/
+recordings/
+maps/
+routes/
 
 # 환경 / 캐시
 .venv/

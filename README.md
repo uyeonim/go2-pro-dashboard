@@ -2,9 +2,13 @@
 
 Unitree **Go2 Pro**에서 PC로 **센서 · 카메라 · LiDAR** 데이터를 무선(Wi-Fi / WebRTC)으로 받아 웹 대시보드에 실시간으로 보여주는 프로젝트입니다. 연구실 인턴 과제로 만들었습니다.
 
-- 왼쪽: 전면 카메라 영상 (약 12fps) + LiDAR를 위에서 본 지도 (로봇 중심, 반경 4m)
-- 오른쪽: 배터리, 위치, 방향(yaw), 속도, 자세(roll/pitch), 발 접촉력, 장애물 거리
-- 실행하면 로봇에 자동 연결, 끊기면 자동 재연결
+- 왼쪽: 전면 카메라 영상 (같은 PC 약 14fps, 공개 주소 약 8fps) + LiDAR를 위에서 본 지도 (로봇 중심, 반경 4m, 지나온 경로 표시)
+- 오른쪽: 배터리, 위치, 방향(yaw), 속도, 자세(roll/pitch), 장애물 거리(LiDAR로 계산), 관절 모터 온도 12개
+- 경고 띠: 배터리 20% 이하, 모터 60°C 이상(70°C 이상은 위험), 연결 끊김
+- 📷 사진 저장, ⏺ 녹화(영상 mp4 + 센서 CSV), 녹화 파일 내려받기
+- 연결 단계(연결 중 / 실패 / 재연결 / 서버 꺼짐)를 화면에 표시하고, 끊기면 자동 재연결
+- 로봇에서 값이 안 들어오는 항목(Go2 Pro의 발 접촉력 등)은 자동으로 숨김
+- **데모 모드**: 로봇 없이 가짜 데이터로 화면을 개발·확인 (`--demo`)
 
 Go2 Air/Pro는 공식 SDK가 열려 있지 않아서, 앱과 같은 WebRTC 방식을 쓰는 커뮤니티 라이브러리 [`unitree_webrtc_connect`](https://github.com/legion1581/unitree_webrtc_connect) (MIT)를 사용합니다.
 
@@ -17,6 +21,9 @@ Go2 Air/Pro는 공식 SDK가 열려 있지 않아서, 앱과 같은 WebRTC 방�
 | `sensors.py` | 터미널에 센서값 출력 + `logs/`에 CSV 저장 |
 | `camera.py` | OpenCV 창으로 카메라 보기, 사진(`s`)·녹화(`r`) → `captures/` |
 | `대시보드_실행.bat` | 더블클릭으로 대시보드 실행 |
+| `공개주소_실행.bat` | 대시보드 + Cloudflare 공개 주소를 한 번에 실행 |
+| `데모_실행.bat` | 로봇 없이 데모 모드로 실행 |
+| `ros2/` | WSL ROS2 SLAM 설치·실행·지도 저장 스크립트 |
 
 ## 설치
 
@@ -40,10 +47,51 @@ UNITREE_AES_128_KEY=<32자리 16진수>
 로봇은 WebRTC 연결을 **한 번에 하나만** 받습니다. 폰 앱과 다른 스크립트는 꺼 두고 하나만 실행하세요.
 
 ```bash
+.venv\Scripts\python dashboard.py --demo   # 로봇·Wi-Fi 없이 가짜 데이터 (.env 필요 없음)
 .venv\Scripts\python dashboard.py      # 브라우저가 http://127.0.0.1:8000 으로 열림
 .venv\Scripts\python sensors.py        # 터미널 출력 + CSV
 .venv\Scripts\python camera.py         # 카메라 창
 ```
+
+## 외부에서 보기 (Cloudflare Quick Tunnel)
+
+[`cloudflared`](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/)를 설치한 뒤 `공개주소_실행.bat`를 실행하면 `https://xxxx.trycloudflare.com` 주소가 나옵니다.
+
+- 링크를 아는 사람은 **누구나** 카메라 영상을 보고, 사진·녹화 파일을 내려받고, 녹화를 시작할 수 있으니 필요한 사람에게만 공유하세요.
+- 실행할 때마다 주소가 바뀌고, 이 PC·대시보드·로봇이 켜져 있을 때만 보입니다.
+
+## 지도 만들기 (ROS2 SLAM)
+
+WSL Ubuntu 24.04 + ROS2 Jazzy에서 [`go2_ros2_sdk`](https://github.com/abizovnuralem/go2_ros2_sdk)와 `slam_toolbox`로 방 전체 지도를 만듭니다.
+
+```bash
+wsl -d Ubuntu-24.04
+bash /mnt/c/Users/yeonwoo/robotdog/ros2/setup_wsl.sh      # 최초 1회 설치 (sudo 비밀번호 필요, 로봇 없어도 됨)
+bash /mnt/c/Users/yeonwoo/robotdog/ros2/run_slam.sh       # 로봇 연결 + SLAM + RViz (.env의 IP·키 사용)
+bash /mnt/c/Users/yeonwoo/robotdog/ros2/save_map.sh lab   # 다른 WSL 창에서: maps/lab.png/.pgm/.yaml 저장
+bash /mnt/c/Users/yeonwoo/robotdog/ros2/run_detector.sh   # 다른 WSL 창에서: 카메라 사물 인식 (GPU)
+```
+
+- 사물 인식은 PyTorch(GPU, 약 3GB)를 씁니다. 지도만 필요하면 `SKIP_TORCH=1 bash .../setup_wsl.sh`로 건너뛸 수 있습니다.
+
+### Nav2로 정해진 경로 주행
+
+모든 명령은 `wsl -d Ubuntu-24.04 bash /mnt/c/Users/yeonwoo/robotdog/ros2/...` 형식으로 실행합니다.
+
+| 순서 | 명령 | 하는 일 |
+|---|---|---|
+| 1 | `run_nav_live.sh` | 실시간 지도 + Nav2. RViz의 **Nav2 Goal**로 목표를 찍어 첫 시험 |
+| 2 | `save_map.sh lab` | 지도를 `maps/lab.yaml`로 저장 |
+| 3 | `run_nav.sh lab` | 저장한 지도 + AMCL. RViz의 **2D Pose Estimate**로 시작 위치 지정 |
+| 4 | `route.sh record lab_loop` | RViz의 **Publish Point**로 찍은 점들을 `routes/lab_loop.yaml`로 저장 |
+| 5 | `route.sh follow lab_loop` | 경로를 차례로 주행 (`--loop` 반복, 1번 모드에서는 `--live`) |
+
+- 속도는 실행할 때마다 **전진 0.35 m/s, 회전 0.8 rad/s**로 제한합니다 (드라이버 기본값 3.0 m/s). 바꾸려면 `MAX_V=0.5 MAX_W=1.0` 을 앞에 붙입니다.
+- 주행 중 실제 위치는 `routes/logs/<경로>_<시각>.csv`에 기록돼 계획 경로와 비교할 수 있습니다.
+- Ctrl+C를 누르면 이동을 취소하고, `twist_mux`가 0.5초 안에 명령을 끊어 로봇이 멈춥니다. 리모컨 비상정지(**L2 + B**)는 항상 준비하세요.
+
+- RViz가 뜨면 **리모컨으로 로봇을 천천히** 몰아서 방을 돌면 지도가 쌓입니다.
+- 로봇은 연결을 하나만 받으니 **대시보드와 폰 앱은 꺼 두세요.**
 
 ## AES 키 (펌웨어 1.1.15 이상)
 
@@ -62,7 +110,8 @@ Go2 펌웨어 1.1.15부터 LAN 연결에 **로봇별 AES-128 키**가 필요합�
 | `LocalSignalingPortError` | 로봇에 닿지 않음 → 같은 Wi-Fi인지, IP가 맞는지 확인 |
 | ICE가 `checking`에서 멈춤 / `DataChannelTimeoutError` | PC와 로봇이 다른 Wi-Fi(예: 2.4G/5G)에 있거나 이전 연결이 남아 있음. 같은 Wi-Fi로 맞추고, 안 되면 로봇 재부팅 |
 | 카메라가 느리거나 멈춤 | Windows에서 `localhost`가 IPv6를 먼저 시도해 요청마다 ~2초 지연 → 서버가 `::1`도 받도록 처리함. `127.0.0.1` 주소 권장 |
-| 장애물 거리가 0.00 m | 로봇의 장애물 회피 기능이 꺼져 있으면 값이 채워지지 않는 것으로 보임 (미확인) |
+| 로봇이 주는 장애물 거리가 0 | Go2 Pro에서는 값이 안 들어옴 → 대시보드가 LiDAR 점으로 직접 계산해서 표시 |
+| 녹화 영상이 브라우저에서 안 열림 | mp4v 코덱이라 내려받아서 재생 (Windows 미디어 플레이어, VLC 등) |
 
 ## 안전
 

@@ -12,170 +12,418 @@
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--text);
        font-family:'Segoe UI','Malgun Gothic',system-ui,sans-serif;}
-  header{display:flex;align-items:center;gap:12px;padding:14px 20px;border-bottom:1px solid var(--line);background:var(--panel);}
+  header{display:flex;align-items:center;gap:12px;padding:14px 20px;border-bottom:1px solid var(--line);background:var(--panel);flex-wrap:wrap}
   header h1{font-size:17px;margin:0;font-weight:700;letter-spacing:.3px}
-  #dot{width:10px;height:10px;border-radius:50%;background:var(--muted);box-shadow:0 0 8px currentColor}
-  #status{color:var(--muted);font-size:13px;margin-left:auto}
-  main{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(300px,1fr);gap:16px;padding:16px;}
-  @media (max-width:860px){main{grid-template-columns:1fr}}
-  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow:hidden}
-  .card h2{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);
-           margin:0;padding:12px 16px;border-bottom:1px solid var(--line);background:var(--panel2)}
-  .vidwrap{background:#000;display:flex;align-items:center;justify-content:center;aspect-ratio:4/3}
+  .demo-tag{font-size:11px;font-weight:700;color:#111;background:var(--warn);padding:2px 8px;border-radius:999px}
+
+  /* 상단 상태 표시 */
+  #pill{margin-left:auto;display:flex;align-items:center;gap:8px;padding:6px 12px;border-radius:999px;
+        font-size:13px;background:var(--panel2);border:1px solid var(--line);color:var(--muted);max-width:100%}
+  #pill .ic{width:10px;height:10px;border-radius:50%;background:var(--muted);flex:none}
+  #pill.ok  {color:var(--ok);  border-color:color-mix(in srgb,var(--ok) 40%,transparent)}
+  #pill.ok .ic{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+  #pill.busy{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 40%,transparent)}
+  #pill.bad {color:var(--bad); border-color:color-mix(in srgb,var(--bad) 40%,transparent)}
+  #pill.bad .ic{background:var(--bad)}
+  #pill.busy .ic{background:none;border:2px solid var(--warn);border-top-color:transparent;animation:spin .8s linear infinite}
+
+  /* 경고 띠 */
+  #alerts{display:flex;flex-direction:column;gap:6px;padding:0 16px}
+  #alerts:not(:empty){padding-top:12px}
+  .alert{display:flex;align-items:center;gap:10px;padding:9px 14px;border-radius:10px;font-size:13.5px;font-weight:600}
+  .alert.bad{background:color-mix(in srgb,var(--bad) 16%,var(--panel));color:#ffc9d2;border:1px solid color-mix(in srgb,var(--bad) 45%,transparent)}
+  .alert.warn{background:color-mix(in srgb,var(--warn) 14%,var(--panel));color:#ffe3a8;border:1px solid color-mix(in srgb,var(--warn) 40%,transparent)}
+
+  /* 위: 카메라 | LiDAR (16:9와 8:5 화면 높이가 같아지도록 10:9 비율) · 아래: 센서 | 녹화 파일 */
+  main{display:grid;grid-template-columns:minmax(0,10fr) minmax(0,9fr);gap:16px;padding:16px 16px 0;}
+  .bottom{display:grid;grid-template-columns:minmax(0,3fr) minmax(260px,1fr);gap:16px;padding:16px;align-items:start}
+  @media (max-width:900px){main,.bottom{grid-template-columns:1fr}}
+  .card{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow:hidden}
+  .card h2{display:flex;align-items:center;gap:8px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);
+           margin:0;padding:8px 10px 8px 16px;min-height:41px;border-bottom:1px solid var(--line);background:var(--panel2)}
+  .sub{text-transform:none;letter-spacing:0;font-weight:400}
+  .acts{margin-left:auto;display:flex;gap:6px}
+  .btn{font:inherit;font-size:12px;letter-spacing:0;text-transform:none;color:var(--text);background:var(--panel);
+       border:1px solid var(--line);border-radius:8px;padding:5px 10px;cursor:pointer;white-space:nowrap}
+  .btn:hover{border-color:var(--accent)}
+  .btn:disabled{opacity:.45;cursor:default}
+  .btn.rec{color:#fff;background:var(--bad);border-color:var(--bad)}
+  .btn.rec::before{content:'';display:inline-block;width:8px;height:8px;border-radius:50%;background:#fff;margin-right:6px;animation:blink 1s infinite}
+  .vidwrap{background:#000;display:flex;align-items:center;justify-content:center;aspect-ratio:16/9}
   .vidwrap img{width:100%;height:100%;object-fit:contain;display:block}
-  .grid{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line)}
-  .tile{background:var(--panel);padding:14px 16px}
+  .mapwrap{background:#0a0d12;aspect-ratio:8/5}
+  .mapwrap canvas{width:100%;height:100%;display:block}
+
+  .grid{display:grid;grid-template-columns:repeat(4,1fr);grid-auto-flow:row dense;margin:0 -1px -1px 0}
+  @media (max-width:700px){.grid{grid-template-columns:1fr 1fr}}
+  .tile{background:var(--panel);padding:14px 16px;border-right:1px solid var(--line);border-bottom:1px solid var(--line)}
   .tile .k{font-size:11px;color:var(--muted);letter-spacing:.04em}
   .tile .v{font-size:22px;font-weight:700;margin-top:4px;font-variant-numeric:tabular-nums}
   .tile .u{font-size:12px;color:var(--muted);font-weight:400;margin-left:3px}
-  .full{grid-column:1/-1}
+  .full{grid-column:span 2}   /* 넓은 화면에서는 2칸, 좁은 화면(2열)에서는 한 줄 전체 */
+  .hidden{display:none !important}
   .bar{height:8px;border-radius:6px;background:var(--panel2);overflow:hidden;margin-top:8px}
-  .bar>i{display:block;height:100%;background:var(--ok);width:0}
-  .foot{display:flex;gap:6px;margin-top:6px}
-  .foot span{flex:1;text-align:center;padding:6px 0;border-radius:6px;background:var(--panel2);
+  .bar>i{display:block;height:100%;background:var(--ok);width:0;transition:width .4s}
+  .quad{display:flex;gap:6px;margin-top:6px}
+  .quad span{flex:1;text-align:center;padding:6px 0;border-radius:6px;background:var(--panel2);
              font-size:12px;font-variant-numeric:tabular-nums}
+  .temps{display:grid;grid-template-columns:auto repeat(3,1fr);gap:4px;margin-top:8px;font-size:12px;align-items:center}
+  .temps .h{color:var(--muted);text-align:center;font-size:11px}
+  .temps .l{color:var(--muted);font-weight:700;padding-right:4px}
+  .temps .c{text-align:center;padding:5px 0;border-radius:6px;background:var(--panel2);font-variant-numeric:tabular-nums}
+  .temps .c.warm{background:color-mix(in srgb,var(--warn) 28%,var(--panel2));color:#ffe3a8}
+  .temps .c.hot{background:color-mix(in srgb,var(--bad) 35%,var(--panel2));color:#fff}
+  .note{font-size:11px;color:var(--muted);padding:10px 16px;border-top:1px solid var(--line)}
+
+  .files{list-style:none;margin:0;padding:6px 0}
+  .files li{display:flex;align-items:center;gap:8px;padding:7px 16px;font-size:13px;border-bottom:1px solid var(--line)}
+  .files li:last-child{border-bottom:0}
+  .files .nm{font-variant-numeric:tabular-nums}
+  .files a{color:var(--accent);text-decoration:none;font-size:12px}
+  .files a:hover{text-decoration:underline}
+  .files .empty{color:var(--muted);font-size:12px}
+
+  /* 카드 위에 덮는 상태 안내 (로딩 / 연결 안 됨 / 끊김) */
+  .ov{position:absolute;inset:41px 0 0 0;display:flex;flex-direction:column;align-items:center;justify-content:center;
+      gap:10px;text-align:center;padding:20px;background:rgba(14,17,22,.86);backdrop-filter:blur(3px);z-index:2}
+  .ov.off{display:none}
+  .ov .sp{width:34px;height:34px;border-radius:50%;border:3px solid var(--line);border-top-color:var(--accent);animation:spin .9s linear infinite}
+  .ov .mk{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:18px}
+  .ov.warn .mk{background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn)}
+  .ov.bad  .mk{background:color-mix(in srgb,var(--bad) 18%,transparent);color:var(--bad)}
+  .ov .t{font-size:15px;font-weight:700}
+  .ov .d{font-size:12.5px;color:var(--muted);max-width:420px;line-height:1.5}
+  #toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--panel2);border:1px solid var(--line);
+         padding:10px 16px;border-radius:10px;font-size:13px;opacity:0;transition:opacity .25s;pointer-events:none;z-index:9}
+  #toast.on{opacity:1}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  @keyframes blink{50%{opacity:.2}}
   footer{color:var(--muted);font-size:11px;text-align:center;padding:10px}
-  .col{display:flex;flex-direction:column;gap:16px;min-width:0}
-  .mapwrap{background:#0a0d12;aspect-ratio:8/5}
-  .mapwrap canvas{width:100%;height:100%;display:block}
-  .sub{text-transform:none;letter-spacing:0;font-weight:400;margin-left:8px}
 </style>
 </head>
 <body>
 <header>
-  <span id="dot"></span>
   <h1>Unitree Go2 · 실시간 대시보드</h1>
-  <span id="status">시작 중…</span>
+  <span id="demotag" class="demo-tag hidden">DEMO · 가짜 데이터</span>
+  <span id="pill" class="busy"><span class="ic"></span><span id="pilltext">시작 중…</span></span>
 </header>
+<div id="alerts"></div>
 
 <main>
-  <div class="col">
-    <section class="card">
-      <h2>카메라 <span id="camage" class="sub"></span></h2>
-      <div class="vidwrap"><img id="cam" alt="camera"></div>
+    <section class="card" id="c-cam">
+      <h2>카메라 <span id="camage" class="sub"></span>
+        <span class="acts">
+          <button class="btn" id="b-snap" title="지금 화면을 사진으로 저장">📷 사진</button>
+          <button class="btn" id="b-rec" title="영상과 센서값을 함께 저장">⏺ 녹화</button>
+        </span>
+      </h2>
+      <div class="vidwrap"><img id="cam" alt="카메라 영상"></div>
+      <div class="ov" id="ov-cam"></div>
     </section>
-    <section class="card">
-      <h2>LiDAR · 위에서 본 지도 <span id="lidarinfo" class="sub"></span></h2>
+    <section class="card" id="c-map">
+      <h2>LiDAR · 위에서 본 지도 <span id="lidarinfo" class="sub"></span>
+        <span class="acts"><button class="btn" id="b-trail" title="지나온 경로 지우기">경로 지우기</button></span>
+      </h2>
       <div class="mapwrap"><canvas id="map" width="800" height="500"></canvas></div>
+      <div class="ov" id="ov-map"></div>
     </section>
-  </div>
-
-  <section class="card">
-    <h2>센서</h2>
-    <div class="grid">
-      <div class="tile full">
-        <div class="k">배터리</div>
-        <div class="v"><span id="battery">–</span><span class="u">%</span>
-          <span class="u" id="voltage"></span></div>
-        <div class="bar"><i id="battbar"></i></div>
-      </div>
-      <div class="tile"><div class="k">위치 X</div><div class="v"><span id="px">–</span><span class="u">m</span></div></div>
-      <div class="tile"><div class="k">위치 Y</div><div class="v"><span id="py">–</span><span class="u">m</span></div></div>
-      <div class="tile"><div class="k">방향 (Yaw)</div><div class="v"><span id="yaw">–</span><span class="u">rad</span></div></div>
-      <div class="tile"><div class="k">몸높이</div><div class="v"><span id="height">–</span><span class="u">m</span></div></div>
-      <div class="tile"><div class="k">속도 Vx</div><div class="v"><span id="vx">–</span><span class="u">m/s</span></div></div>
-      <div class="tile"><div class="k">속도 Vy</div><div class="v"><span id="vy">–</span><span class="u">m/s</span></div></div>
-      <div class="tile"><div class="k">Roll</div><div class="v"><span id="roll">–</span></div></div>
-      <div class="tile"><div class="k">Pitch</div><div class="v"><span id="pitch">–</span></div></div>
-      <div class="tile full">
-        <div class="k">발 접촉력 (FR · FL · RR · RL)</div>
-        <div class="foot">
-          <span id="f0">–</span><span id="f1">–</span><span id="f2">–</span><span id="f3">–</span>
-        </div>
-      </div>
-      <div class="tile full">
-        <div class="k">장애물 거리 (앞 · 왼쪽 · 뒤 · 오른쪽)</div>
-        <div class="foot">
-          <span id="o0">–</span><span id="o1">–</span><span id="o2">–</span><span id="o3">–</span>
-        </div>
-      </div>
-    </div>
-  </section>
 </main>
 
-<footer>로봇에서 0.2초마다 갱신 · 폰 앱이 연결돼 있으면 영상/데이터가 안 나올 수 있어요</footer>
+<div class="bottom">
+    <section class="card" id="c-sen">
+      <h2>센서</h2>
+      <div class="grid">
+        <div class="tile full">
+          <div class="k">배터리</div>
+          <div class="v"><span id="battery">–</span><span class="u">%</span>
+            <span class="u" id="voltage"></span></div>
+          <div class="bar"><i id="battbar"></i></div>
+        </div>
+        <div class="tile"><div class="k">위치 X</div><div class="v"><span id="px">–</span><span class="u">m</span></div></div>
+        <div class="tile"><div class="k">위치 Y</div><div class="v"><span id="py">–</span><span class="u">m</span></div></div>
+        <div class="tile"><div class="k">방향 (Yaw)</div><div class="v"><span id="yaw">–</span><span class="u">rad</span></div></div>
+        <div class="tile"><div class="k">몸높이</div><div class="v"><span id="height">–</span><span class="u">m</span></div></div>
+        <div class="tile"><div class="k">속도 Vx</div><div class="v"><span id="vx">–</span><span class="u">m/s</span></div></div>
+        <div class="tile"><div class="k">속도 Vy</div><div class="v"><span id="vy">–</span><span class="u">m/s</span></div></div>
+        <div class="tile"><div class="k">Roll</div><div class="v"><span id="roll">–</span><span class="u">rad</span></div></div>
+        <div class="tile"><div class="k">Pitch</div><div class="v"><span id="pitch">–</span><span class="u">rad</span></div></div>
+        <!-- 아래 칸들은 값이 실제로 들어와야 보임 -->
+        <div class="tile full hidden" id="t-obs">
+          <div class="k">장애물 거리 (앞 · 왼쪽 · 뒤 · 오른쪽) <span id="obssrc"></span></div>
+          <div class="quad"><span id="o0">–</span><span id="o1">–</span><span id="o2">–</span><span id="o3">–</span></div>
+        </div>
+        <div class="tile full hidden" id="t-temp">
+          <div class="k">관절 모터 온도 (°C) <span id="tempmax"></span></div>
+          <div class="temps" id="temps"></div>
+        </div>
+        <div class="tile full hidden" id="t-foot">
+          <div class="k">발 접촉력 (FR · FL · RR · RL)</div>
+          <div class="quad"><span id="f0">–</span><span id="f1">–</span><span id="f2">–</span><span id="f3">–</span></div>
+        </div>
+      </div>
+      <div class="note hidden" id="hiddennote"></div>
+      <div class="ov" id="ov-sen"></div>
+    </section>
+
+    <section class="card" id="c-rec">
+      <h2>녹화 파일 <span class="sub">(영상 mp4 + 센서 CSV)</span></h2>
+      <ul class="files" id="reclist"><li class="empty">아직 녹화한 파일이 없어요.</li></ul>
+    </section>
+</div>
+
+<footer>로봇은 한 번에 하나만 연결돼요 (폰 앱은 꺼 두세요) · 영상 mp4는 내려받아서 재생하세요</footer>
+<div id="toast"></div>
 
 <script>
 const $ = id => document.getElementById(id);
 function set(id, v){ const e=$(id); if(e) e.textContent = (v===undefined||v===null)?'–':v; }
+function toast(msg){ const t=$('toast'); t.textContent=msg; t.classList.add('on'); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove('on'), 2600); }
 
-// 카메라: 최신 사진을 계속 받아 와서 교체 (스트림이 조용히 멈추는 문제 방지)
-const cam = $('cam');
-let camUrl = null;
-async function camLoop(){
-  try{
-    const r = await fetch('/frame', {cache:'no-store'});
-    const age = parseFloat(r.headers.get('X-Frame-Age'));
-    const blob = await r.blob();
-    const url = URL.createObjectURL(blob);
-    cam.src = url;
-    if(camUrl) URL.revokeObjectURL(camUrl);
-    camUrl = url;
-    $('camage').textContent = age < 0 ? '' : (age > 2 ? `⚠ 로봇 영상 ${age.toFixed(0)}초째 안 들어옴` : '실시간');
-    setTimeout(camLoop, 70);   // 약 12~14fps
-  }catch(e){
-    $('camage').textContent = '서버 연결 끊김';
-    setTimeout(camLoop, 1000);
+// ── 상태 ──
+let D = null;          // 마지막 /data 응답
+let serverUp = null;   // 대시보드 서버 응답 여부 (null = 아직 모름)
+const seen = { foot:false, obsRobot:false };   // 로봇이 0이 아닌 값을 준 적 있는지
+const LEGS = ['FR','FL','RR','RL'], JOINTS = ['hip','thigh','calf'];
+const TEMP_WARN = 60, TEMP_HOT = 70, BATT_LOW = 20;
+
+// 카드 덮개: kind = 'spin' | 'warn' | 'bad' | null(숨김)
+function ov(id, kind, title, detail){
+  const e = $(id);
+  if(!kind){ e.classList.add('off'); return; }
+  const icon = kind==='spin' ? '<div class="sp"></div>' : `<div class="mk">${kind==='bad'?'✕':'!'}</div>`;
+  const html = `${icon}<div class="t">${title}</div>${detail?`<div class="d">${detail}</div>`:''}`;
+  if(e.dataset.h !== html){ e.innerHTML = html; e.dataset.h = html; }
+  e.className = 'ov ' + (kind==='spin' ? '' : kind);
+}
+function pill(cls, text){ $('pill').className = cls; $('pilltext').textContent = text; }
+
+function phaseInfo(d){
+  const n = d.attempt > 1 ? ` (${d.attempt}번째 시도)` : '';
+  switch(d.phase){
+    case 'connecting':   return {pill:'로봇에 연결 중…'+n, title:'로봇에 연결하는 중', detail:'로봇과 암호 키를 주고받고 있어요. 보통 몇 초면 돼요.'};
+    case 'retrying':     return {pill:'연결 실패 · 곧 다시 시도'+n, title:'로봇에 연결하지 못했어요', detail:(d.error||'')+' 5초 뒤 자동으로 다시 시도해요.'};
+    case 'reconnecting': return {pill:'연결이 끊겨 다시 연결 중…', title:'연결이 끊겨서 다시 연결하는 중', detail:(d.error?d.error+' · ':'')+'화면 값은 끊기기 전 마지막 값이에요.'};
+    default: return null;
   }
 }
-camLoop();
+function freshness(id, age, waiting, label){
+  if(age===null || age===undefined) return ov(id, 'spin', waiting, '로봇에서 첫 데이터를 기다리고 있어요.');
+  if(age > 3) return ov(id, 'warn', `${label}가 ${age.toFixed(0)}초째 안 들어와요`, '15초가 넘으면 자동으로 다시 연결해요.');
+  ov(id, null);
+}
 
+function render(){
+  const cards = ['ov-cam','ov-map','ov-sen'];
+  if(serverUp === false){
+    pill('bad', '대시보드 서버 꺼짐');
+    cards.forEach(c => ov(c, 'bad', '대시보드 서버에 연결할 수 없어요', 'PC에서 dashboard.py가 켜져 있는지 확인하세요. 켜지면 자동으로 다시 붙어요.'));
+    renderAlerts([{lv:'bad', msg:'대시보드 서버에 연결할 수 없어요'}]);
+    return;
+  }
+  if(!D){ pill('busy', '대시보드 불러오는 중…'); cards.forEach(c => ov(c, 'spin', '불러오는 중')); return; }
+  $('demotag').classList.toggle('hidden', !D.demo);
+
+  const alerts = [];
+  const p = phaseInfo(D);
+  if(p){
+    pill(D.phase==='retrying' ? 'bad' : 'busy', p.pill);
+    cards.forEach(c => ov(c, D.phase==='retrying' ? 'bad' : 'spin', p.title, p.detail));
+    if(D.phase === 'reconnecting') alerts.push({lv:'bad', msg:'로봇 연결이 끊겼어요 — 자동으로 다시 연결하는 중'});
+  } else {
+    pill('ok', D.demo ? '연결됨 (데모)' : '연결됨');
+    freshness('ov-cam', D.video_age, '카메라 영상 기다리는 중', '영상');
+    freshness('ov-map', D.lidar_age, 'LiDAR 데이터 기다리는 중', 'LiDAR 데이터');
+    freshness('ov-sen', D.sport_age, '센서 데이터 기다리는 중', '센서 데이터');
+  }
+  if(D.battery !== undefined && D.battery <= BATT_LOW)
+    alerts.push({lv:'bad', msg:`배터리 ${D.battery}% — 충전하세요. 걷는 테스트는 멈추는 게 좋아요.`});
+  if(D.motors){
+    const hot = D.motors.map((t,i)=>({t,i})).filter(m => m.t >= TEMP_WARN).sort((a,b)=>b.t-a.t);
+    if(hot.length){
+      const top = hot[0], name = `${LEGS[Math.floor(top.i/3)]} ${JOINTS[top.i%3]}`;
+      alerts.push({lv: top.t >= TEMP_HOT ? 'bad' : 'warn',
+                   msg:`모터 온도 높음: ${name} ${top.t}°C${hot.length>1?` 외 ${hot.length-1}개`:''}${top.t>=TEMP_HOT?' — 로봇을 쉬게 하세요':''}`});
+    }
+  }
+  renderAlerts(alerts);
+}
+function renderAlerts(list){
+  const html = list.map(a => `<div class="alert ${a.lv}">${a.lv==='bad'?'⛔':'⚠️'} ${a.msg}</div>`).join('');
+  if($('alerts').dataset.h !== html){ $('alerts').innerHTML = html; $('alerts').dataset.h = html; }
+}
+
+// ── 센서 ──
+const nonzero = arr => arr && arr.some(v => typeof v==='number' && Math.abs(v) > 1e-6);
+const fmtDist = v => v===null||v===undefined ? '4m+' : v.toFixed(2)+' m';
+function renderTemps(m){
+  let html = '<span></span>' + JOINTS.map(j=>`<span class="h">${j}</span>`).join('');
+  LEGS.forEach((leg, li) => {
+    html += `<span class="l">${leg}</span>`;
+    for(let j=0;j<3;j++){
+      const t = m[li*3+j];
+      const cls = t>=TEMP_HOT ? 'hot' : t>=TEMP_WARN ? 'warm' : '';
+      html += `<span class="c ${cls}">${t ?? '–'}</span>`;
+    }
+  });
+  $('temps').innerHTML = html;
+  set('tempmax', `· 최고 ${Math.max(...m.filter(v=>typeof v==='number'))}°C`);
+}
 async function tick(){
   try{
     const r = await fetch('/data', {cache:'no-store'});
-    const d = await r.json();
-
-    $('status').textContent = d.status || '';
-    const ok = d.connected;
-    $('dot').style.color = ok ? 'var(--ok)' : 'var(--bad)';
-    $('dot').style.background = ok ? 'var(--ok)' : 'var(--bad)';
-
+    D = await r.json();
+    serverUp = true;
+    const d = D;
     if(d.pos){
       set('px', d.pos[0].toFixed(2)); set('py', d.pos[1].toFixed(2));
       set('yaw', d.rpy[2].toFixed(2));
       set('roll', d.rpy[0].toFixed(2)); set('pitch', d.rpy[1].toFixed(2));
       set('height', d.height.toFixed(2));
       set('vx', d.vel[0].toFixed(2)); set('vy', d.vel[1].toFixed(2));
-      if(d.foot_force) d.foot_force.forEach((f,i)=>set('f'+i, f));
-      if(d.obstacle) d.obstacle.forEach((o,i)=>set('o'+i, (typeof o==='number'? o.toFixed(2)+' m' : o)));
+      if(nonzero(d.foot_force)) seen.foot = true;
+      if(nonzero(d.obstacle)) seen.obsRobot = true;
+      $('t-foot').classList.toggle('hidden', !seen.foot);
+      if(seen.foot) d.foot_force.forEach((f,i)=>set('f'+i, f));
+      // 장애물 거리: 로봇이 주면 그 값, 아니면 LiDAR 점으로 계산한 값
+      const obs = seen.obsRobot ? d.obstacle : d.obstacle_lidar;
+      $('t-obs').classList.toggle('hidden', !obs);
+      if(obs){
+        obs.forEach((o,i)=>set('o'+i, seen.obsRobot ? o.toFixed(2)+' m' : fmtDist(o)));
+        set('obssrc', seen.obsRobot ? '' : '· LiDAR로 계산 (4m까지)');
+      }
+      const hid = [];
+      if(!seen.foot) hid.push('발 접촉력');
+      const showNote = d.connected && d.sport_age !== null && d.sport_age < 3 && hid.length;
+      $('hiddennote').classList.toggle('hidden', !showNote);
+      if(showNote) $('hiddennote').textContent = `이 로봇에서 값이 들어오지 않는 항목은 숨겼어요: ${hid.join(', ')}`;
     }
+    if(d.motors && nonzero(d.motors)){ $('t-temp').classList.remove('hidden'); renderTemps(d.motors); }
     if(d.battery!==undefined){
       set('battery', d.battery);
       $('battbar').style.width = Math.max(0,Math.min(100,d.battery))+'%';
-      $('battbar').style.background = d.battery<20?'var(--bad)':d.battery<50?'var(--warn)':'var(--ok)';
+      $('battbar').style.background = d.battery<=BATT_LOW?'var(--bad)':d.battery<50?'var(--warn)':'var(--ok)';
       set('voltage', d.voltage!==undefined ? '· '+d.voltage+'V' : '');
     }
+    renderRecBtn(d.recording);
   }catch(e){
-    $('status').textContent = '서버 연결 끊김';
-    $('dot').style.background = 'var(--bad)';
+    serverUp = false;
   }
+  render();
 }
-setInterval(tick, 200);
+setInterval(tick, 250);
 tick();
 
-// ── LiDAR 지도: 로봇을 가운데 두고 위에서 본 모습 (반경 4m) ──
+// ── 카메라: 서버가 밀어 보내는 스트림을 직접 읽어서 표시 (3초간 새 프레임이 없으면 다시 연결) ──
+const cam = $('cam');
+let camCtrl = null, camUrl = null, lastFrameAt = 0, frames = 0, fpsT = Date.now();
+function showFrame(bytes){
+  const url = URL.createObjectURL(new Blob([bytes], {type:'image/jpeg'}));
+  cam.src = url;
+  if(camUrl) URL.revokeObjectURL(camUrl);
+  camUrl = url;
+  lastFrameAt = Date.now();
+  frames++;
+}
+function findMarker(buf, b2, from){   // JPEG 시작(FF D8) / 끝(FF D9) 찾기
+  for(let i=from; i<buf.length-1; i++) if(buf[i]===0xFF && buf[i+1]===b2) return i;
+  return -1;
+}
+async function camStream(){
+  camCtrl = new AbortController();
+  lastFrameAt = Date.now();
+  try{
+    const r = await fetch('/video?t='+Date.now(), {signal: camCtrl.signal, cache:'no-store'});
+    const reader = r.body.getReader();
+    let buf = new Uint8Array(0);
+    while(true){
+      const {value, done} = await reader.read();
+      if(done) break;
+      const nb = new Uint8Array(buf.length + value.length); nb.set(buf); nb.set(value, buf.length); buf = nb;
+      let s = findMarker(buf, 0xD8, 0), last = null;
+      while(s >= 0){
+        const e = findMarker(buf, 0xD9, s+2);
+        if(e < 0) break;
+        last = buf.slice(s, e+2);           // 한 번에 여러 장이 오면 가장 최신 것만 표시
+        buf = buf.slice(e+2);
+        s = findMarker(buf, 0xD8, 0);
+      }
+      if(last) showFrame(last);
+      if(buf.length > 4e6) buf = new Uint8Array(0);
+    }
+  }catch(e){}
+  setTimeout(camStream, 800);
+}
+setInterval(() => {   // 감시: 서버는 최소 1초마다 프레임을 보내므로 3초간 없으면 스트림이 멈춘 것
+  if(Date.now() - lastFrameAt > 3000 && camCtrl){ camCtrl.abort(); }
+  const fps = frames / ((Date.now() - fpsT)/1000);
+  $('camage').textContent = (D && D.connected && D.video_age !== null && D.video_age < 2) ? `실시간 · ${fps.toFixed(0)}fps` : '';
+  frames = 0; fpsT = Date.now();
+}, 1000);
+camStream();
+
+// ── 버튼: 사진 / 녹화 / 경로 지우기 ──
+$('b-snap').onclick = async () => {
+  const r = await fetch('/snapshot', {method:'POST'}); const j = await r.json();
+  if(!j.ok) return toast(j.error || '사진 저장 실패');
+  const a = document.createElement('a'); a.href = j.url; a.download = j.name; a.click();
+  toast(`사진 저장: captures/${j.name}`);
+};
+function renderRecBtn(rec){
+  const b = $('b-rec');
+  if(rec && rec.active){
+    const s = Math.floor(rec.elapsed), mm = String(Math.floor(s/60)).padStart(2,'0'), ss = String(s%60).padStart(2,'0');
+    b.className = 'btn rec'; b.textContent = `녹화 중 ${mm}:${ss} · 정지`;
+  } else { b.className = 'btn'; b.textContent = '⏺ 녹화'; }
+}
+$('b-rec').onclick = async () => {
+  const active = D && D.recording && D.recording.active;
+  const j = await (await fetch(active ? '/record/stop' : '/record/start', {method:'POST'})).json();
+  toast(active ? `녹화 저장됨: recordings/${j.name}` : '녹화를 시작했어요 (영상 + 센서 CSV)');
+  if(active) setTimeout(loadRecordings, 600);
+  tick();
+};
+$('b-trail').onclick = async () => { await fetch('/trail/clear', {method:'POST'}); toast('경로를 지웠어요'); };
+
+async function loadRecordings(){
+  try{
+    const list = await (await fetch('/recordings', {cache:'no-store'})).json();
+    $('reclist').innerHTML = list.length ? list.map(r => {
+      const t = r.name.replace(/^(\d{4})(\d\d)(\d\d)_(\d\d)(\d\d)(\d\d)$/, '$2/$3 $4:$5:$6');
+      const links = r.files.map(f => `<a href="${f.url}" download>${f.name.endsWith('.mp4')?'영상':'센서 CSV'} (${f.kb>1024?(f.kb/1024).toFixed(1)+'MB':f.kb+'KB'})</a>`).join(' · ');
+      return `<li><span class="nm">${t}</span><span style="margin-left:auto">${links || '<span class="empty">파일 없음</span>'}</span></li>`;
+    }).join('') : '<li class="empty">아직 녹화한 파일이 없어요.</li>';
+  }catch(e){}
+}
+loadRecordings();
+
+// ── LiDAR 지도: 로봇을 가운데 두고 위에서 본 모습 (반경 4m) + 지나온 경로 ──
 const cv = $('map'), cx = cv.getContext('2d');
 const RANGE = 4; // m
 function drawMap(L){
   const W = cv.width, H = cv.height, s = Math.min(W, H) / (2*RANGE);
   cx.fillStyle = '#0a0d12'; cx.fillRect(0,0,W,H);
-  // 1m 격자
-  cx.strokeStyle = '#1b2230'; cx.lineWidth = 1;
+  cx.strokeStyle = '#1b2230'; cx.lineWidth = 1;   // 1m 격자
   for(let m=-RANGE*2; m<=RANGE*2; m++){
     cx.beginPath(); cx.moveTo(W/2+m*s,0); cx.lineTo(W/2+m*s,H); cx.stroke();
     cx.beginPath(); cx.moveTo(0,H/2+m*s); cx.lineTo(W,H/2+m*s); cx.stroke();
   }
-  if(!L.robot){ cx.fillStyle='#8b97a7'; cx.font='16px sans-serif'; cx.fillText('LiDAR 데이터 대기 중…', 20, 30); return; }
+  if(!L.robot) return;
   const [rx, ry] = L.robot;
-  // 점: 로봇 기준 상대좌표, 화면 위쪽 = 월드 +x
+  const P = (x,y) => [W/2 - (y-ry)*s, H/2 - (x-rx)*s];   // 화면 위쪽 = 월드 +x
   cx.fillStyle = '#4c8dff';
   for(const [x,y] of L.points){
-    const dx = x-rx, dy = y-ry;
-    if(Math.abs(dx)>RANGE*1.6 || Math.abs(dy)>RANGE*1.6) continue;
-    cx.fillRect(W/2 - dy*s - 1, H/2 - dx*s - 1, 2.5, 2.5);
+    if(Math.abs(x-rx)>RANGE*1.6 || Math.abs(y-ry)>RANGE*1.6) continue;
+    const [u,v] = P(x,y); cx.fillRect(u-1, v-1, 2.5, 2.5);
   }
-  // 로봇 (화살표 = 바라보는 방향)
-  const a = L.yaw || 0;
+  if(L.trail && L.trail.length > 1){             // 지나온 경로
+    cx.strokeStyle = 'rgba(255,176,32,.9)'; cx.lineWidth = 2.5; cx.lineJoin = 'round';
+    cx.beginPath();
+    L.trail.forEach(([x,y],i) => { const [u,v] = P(x,y); i ? cx.lineTo(u,v) : cx.moveTo(u,v); });
+    cx.lineTo(W/2, H/2); cx.stroke();
+    const [u0,v0] = P(...L.trail[0]);            // 출발점
+    cx.fillStyle = '#ffb020'; cx.beginPath(); cx.arc(u0, v0, 5, 0, Math.PI*2); cx.fill();
+  }
+  const a = L.yaw || 0;                          // 로봇 (화살표 = 바라보는 방향)
   cx.save(); cx.translate(W/2, H/2); cx.rotate(-a);
   cx.fillStyle = '#39d98a';
   cx.beginPath(); cx.moveTo(0,-14); cx.lineTo(9,10); cx.lineTo(-9,10); cx.closePath(); cx.fill();
@@ -185,7 +433,10 @@ async function lidarTick(){
   try{
     const L = await (await fetch('/lidar', {cache:'no-store'})).json();
     drawMap(L);
-    $('lidarinfo').textContent = L.points.length ? `${L.points.length}점 · ${L.age}초 전` : '';
+    const parts = [];
+    if(L.points.length && D && D.connected) parts.push(`${L.points.length}점`);
+    if(L.trail_len > 0) parts.push(`이동 ${L.trail_len.toFixed(1)}m`);
+    $('lidarinfo').textContent = parts.join(' · ');
   }catch(e){}
 }
 setInterval(lidarTick, 500);
