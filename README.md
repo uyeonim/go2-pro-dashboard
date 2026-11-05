@@ -20,7 +20,8 @@ Go2 Air/Pro는 공식 SDK가 열려 있지 않아서, 앱과 같은 WebRTC 방�
 | `web/index.html` | 대시보드 화면 |
 | `sensors.py` | 터미널에 센서값 출력 + `logs/`에 CSV 저장 |
 | `camera.py` | OpenCV 창으로 카메라 보기, 사진(`s`)·녹화(`r`) → `captures/` |
-| `대시보드_실행.bat` | 더블클릭으로 대시보드 실행 |
+| `대시보드_켜기끄기.bat` | **더블클릭할 때마다 켜기/끄기** (창 없이 실행 + 공개 주소 + 브라우저, 다시 누르면 종료) |
+| `대시보드_실행.bat` | 더블클릭으로 대시보드 실행 (창이 보이는 방식) |
 | `공개주소_실행.bat` | 대시보드 + 공개 주소(Tailscale 고정 / 없으면 Cloudflare 임시)를 한 번에 실행 |
 | `web/demo.js`, `web/config.js` | 고정 주소용 브라우저 데모와 설정 |
 | `데모_실행.bat` | 로봇 없이 데모 모드로 실행 |
@@ -66,7 +67,7 @@ UNITREE_AES_128_KEY=<32자리 16진수>
 1. https://tailscale.com 에 가입하고 Windows용 Tailscale을 설치·로그인
 2. `공개주소_실행.bat` 실행 → 처음에는 Funnel 허용 안내 링크가 나오니 열어서 허용
 3. 나온 `https://노트북이름.xxxx.ts.net` 주소를 [web/config.js](web/config.js)의 `GO2_LIVE_URL`에 넣고 push
-4. 이후에는 `공개주소_실행.bat`만 실행하면 고정 주소가 실제 화면으로 이어집니다
+4. 이후에는 **`대시보드_켜기끄기.bat`**(바탕화면 바로가기로 만들어 두면 편해요)을 더블클릭하면 켜지고, 다시 누르면 꺼집니다. 켜져 있는 동안만 고정 주소가 실제 화면으로 이어지고, 꺼져 있으면 데모로 열립니다. 로그는 `logs/dashboard_out.log`, `logs/dashboard_err.log`.
 
 Tailscale이 없으면 `공개주소_실행.bat`이 예전처럼 Cloudflare 임시 주소(`https://xxxx.trycloudflare.com`, 실행할 때마다 바뀜)를 엽니다.
 
