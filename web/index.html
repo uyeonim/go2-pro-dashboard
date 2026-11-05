@@ -197,6 +197,9 @@ function toast(msg){ const t=$('toast'); t.textContent=msg; t.classList.add('on'
 // ── 실행 방식: live(노트북 서버) / demo(브라우저 가짜 데이터) / auto(고정 주소 입구) ──
 const MODE_CFG = window.GO2_MODE || 'live';
 const LIVE_URL = (window.GO2_LIVE_URL || '').replace(/\/+$/, '');
+const HOME_URL = window.GO2_HOME_URL || '';                       // 대시보드가 꺼지면 돌아갈 고정 주소(데모)
+const IS_LOCAL = ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(location.hostname);   // 노트북 본인 화면
+let downSince = null;                                               // 서버 응답이 끊긴 시각
 
 // 실제 서버(dashboard.py)에서 데이터를 받는 방법
 const LiveAPI = {
@@ -283,6 +286,13 @@ function freshness(id, age, waiting, label){
 
 function render(){
   if(serverUp === false){
+    // 공개 주소로 보던 사람은 노트북 대시보드가 5초 넘게 꺼져 있으면 고정 주소(데모)로 돌아감
+    if(MODE === 'live' && !IS_LOCAL && HOME_URL && downSince && Date.now() - downSince > 5000){
+      pill('busy', '데모 화면으로 이동 중…');
+      CARDS.forEach(c => ov(c, 'spin', '노트북 대시보드가 꺼졌어요', '데모 화면으로 이동해요. 대시보드가 다시 켜지면 실시간 화면으로 돌아와요.'));
+      location.replace(HOME_URL);
+      return;
+    }
     pill('bad', '대시보드 서버 꺼짐');
     CARDS.forEach(c => ov(c, 'bad', '대시보드 서버에 연결할 수 없어요', 'PC에서 dashboard.py가 켜져 있는지 확인하세요. 켜지면 자동으로 다시 붙어요.'));
     renderAlerts([{lv:'bad', msg:'대시보드 서버에 연결할 수 없어요'}]);
@@ -340,6 +350,7 @@ async function tick(){
   try{
     D = await api.data();
     serverUp = true;
+    downSince = null;
     const d = D;
     if(d.pos){
       set('px', d.pos[0].toFixed(2)); set('py', d.pos[1].toFixed(2));
@@ -373,7 +384,7 @@ async function tick(){
     }
     renderRecBtn(d.recording);
   }catch(e){
-    if(e.message !== 'login') serverUp = false;
+    if(e.message !== 'login'){ serverUp = false; if(!downSince) downSince = Date.now(); }
   }
   render();
 }
@@ -543,6 +554,9 @@ function start(){
     api = window.Go2Demo;
     $('modebar').classList.remove('hidden');
     $('b-rec').disabled = true; $('b-rec').title = '데모에서는 녹화할 수 없어요';
+    // 고정 주소에서 데모를 보는 중이면 30초마다 노트북을 확인해서, 켜지면 실시간 화면으로 이동
+    if(MODE_CFG === 'auto' && LIVE_URL)
+      setInterval(async () => { if(await liveAlive()) location.replace(LIVE_URL + '/'); }, 30000);
   }
   start();
 })();

@@ -116,7 +116,9 @@ def login():
 @app.route("/config.js")
 def config_js():
     """노트북 서버로 열면 항상 실제(live) 모드 — web/config.js(고정 주소용)를 덮어씀."""
-    r = Response("window.GO2_MODE = 'live';\n", mimetype="application/javascript")
+    # GO2_HOME_URL: 공개 주소로 보던 사람이 대시보드가 꺼지면 돌아갈 고정 주소(데모)
+    r = Response(f"window.GO2_MODE = 'live';\nwindow.GO2_HOME_URL = '{PAGES_ORIGIN}/go2-pro-dashboard/';\n",
+                 mimetype="application/javascript")
     r.headers["Cache-Control"] = "no-store"
     return r
 
