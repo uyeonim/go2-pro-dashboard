@@ -121,11 +121,15 @@ def config_js():
     return r
 
 
-@app.route("/health")
+@app.route("/health", methods=["GET", "OPTIONS"])
 def health():
-    """고정 주소 입구(GitHub Pages)가 '노트북 대시보드가 켜져 있나'를 확인하는 곳. 켜짐 여부만 알려줌."""
-    r = jsonify({"ok": True, "robot_connected": state["connected"]})
+    """고정 주소 입구(GitHub Pages)가 '노트북 대시보드가 켜져 있나'를 확인하는 곳. 켜짐 여부만 알려줌.
+    이 노트북에서 열면 ts.net 주소가 Tailscale 내부 IP로 풀려서, Chrome이 '공개 사이트 → 내부망' 요청에
+    허용 헤더(Access-Control-Allow-Private-Network)를 요구할 수 있음 → 미리 확인 요청(OPTIONS)에도 응답."""
+    r = Response(status=204) if request.method == "OPTIONS" else jsonify({"ok": True, "robot_connected": state["connected"]})
     r.headers["Access-Control-Allow-Origin"] = PAGES_ORIGIN
+    r.headers["Access-Control-Allow-Methods"] = "GET"
+    r.headers["Access-Control-Allow-Private-Network"] = "true"
     r.headers["Cache-Control"] = "no-store"
     return r
 
