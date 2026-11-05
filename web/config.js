@@ -3,4 +3,4 @@
 //  GO2_LIVE_URL : 노트북의 고정 공개 주소 (Tailscale Funnel, 예: https://노트북이름.xxxx.ts.net)
 //                 비어 있으면 항상 데모를 보여줌
 window.GO2_MODE = 'auto';
-window.GO2_LIVE_URL = '';
+window.GO2_LIVE_URL = 'https://yeonwoo.tailb48e7d.ts.net';
