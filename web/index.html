@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Go2 대시보드</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b24; --panel2:#1d2430; --line:#2a3340;
+    --text:#e6ebf2; --muted:#8b97a7; --accent:#4c8dff; --ok:#39d98a; --warn:#ffb020; --bad:#ff5470;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font-family:'Segoe UI','Malgun Gothic',system-ui,sans-serif;}
+  header{display:flex;align-items:center;gap:12px;padding:14px 20px;border-bottom:1px solid var(--line);background:var(--panel);}
+  header h1{font-size:17px;margin:0;font-weight:700;letter-spacing:.3px}
+  #dot{width:10px;height:10px;border-radius:50%;background:var(--muted);box-shadow:0 0 8px currentColor}
+  #status{color:var(--muted);font-size:13px;margin-left:auto}
+  main{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(300px,1fr);gap:16px;padding:16px;}
+  @media (max-width:860px){main{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow:hidden}
+  .card h2{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);
+           margin:0;padding:12px 16px;border-bottom:1px solid var(--line);background:var(--panel2)}
+  .vidwrap{background:#000;display:flex;align-items:center;justify-content:center;aspect-ratio:4/3}
+  .vidwrap img{width:100%;height:100%;object-fit:contain;display:block}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line)}
+  .tile{background:var(--panel);padding:14px 16px}
+  .tile .k{font-size:11px;color:var(--muted);letter-spacing:.04em}
+  .tile .v{font-size:22px;font-weight:700;margin-top:4px;font-variant-numeric:tabular-nums}
+  .tile .u{font-size:12px;color:var(--muted);font-weight:400;margin-left:3px}
+  .full{grid-column:1/-1}
+  .bar{height:8px;border-radius:6px;background:var(--panel2);overflow:hidden;margin-top:8px}
+  .bar>i{display:block;height:100%;background:var(--ok);width:0}
+  .foot{display:flex;gap:6px;margin-top:6px}
+  .foot span{flex:1;text-align:center;padding:6px 0;border-radius:6px;background:var(--panel2);
+             font-size:12px;font-variant-numeric:tabular-nums}
+  footer{color:var(--muted);font-size:11px;text-align:center;padding:10px}
+  .col{display:flex;flex-direction:column;gap:16px;min-width:0}
+  .mapwrap{background:#0a0d12;aspect-ratio:8/5}
+  .mapwrap canvas{width:100%;height:100%;display:block}
+  .sub{text-transform:none;letter-spacing:0;font-weight:400;margin-left:8px}
+</style>
+</head>
+<body>
+<header>
+  <span id="dot"></span>
+  <h1>Unitree Go2 · 실시간 대시보드</h1>
+  <span id="status">시작 중…</span>
+</header>
+
+<main>
+  <div class="col">
+    <section class="card">
+      <h2>카메라 <span id="camage" class="sub"></span></h2>
+      <div class="vidwrap"><img id="cam" alt="camera"></div>
+    </section>
+    <section class="card">
+      <h2>LiDAR · 위에서 본 지도 <span id="lidarinfo" class="sub"></span></h2>
+      <div class="mapwrap"><canvas id="map" width="800" height="500"></canvas></div>
+    </section>
+  </div>
+
+  <section class="card">
+    <h2>센서</h2>
+    <div class="grid">
+      <div class="tile full">
+        <div class="k">배터리</div>
+        <div class="v"><span id="battery">–</span><span class="u">%</span>
+          <span class="u" id="voltage"></span></div>
+        <div class="bar"><i id="battbar"></i></div>
+      </div>
+      <div class="tile"><div class="k">위치 X</div><div class="v"><span id="px">–</span><span class="u">m</span></div></div>
+      <div class="tile"><div class="k">위치 Y</div><div class="v"><span id="py">–</span><span class="u">m</span></div></div>
+      <div class="tile"><div class="k">방향 (Yaw)</div><div class="v"><span id="yaw">–</span><span class="u">rad</span></div></div>
+      <div class="tile"><div class="k">몸높이</div><div class="v"><span id="height">–</span><span class="u">m</span></div></div>
+      <div class="tile"><div class="k">속도 Vx</div><div class="v"><span id="vx">–</span><span class="u">m/s</span></div></div>
+      <div class="tile"><div class="k">속도 Vy</div><div class="v"><span id="vy">–</span><span class="u">m/s</span></div></div>
+      <div class="tile"><div class="k">Roll</div><div class="v"><span id="roll">–</span></div></div>
+      <div class="tile"><div class="k">Pitch</div><div class="v"><span id="pitch">–</span></div></div>
+      <div class="tile full">
+        <div class="k">발 접촉력 (FR · FL · RR · RL)</div>
+        <div class="foot">
+          <span id="f0">–</span><span id="f1">–</span><span id="f2">–</span><span id="f3">–</span>
+        </div>
+      </div>
+      <div class="tile full">
+        <div class="k">장애물 거리 (앞 · 왼쪽 · 뒤 · 오른쪽)</div>
+        <div class="foot">
+          <span id="o0">–</span><span id="o1">–</span><span id="o2">–</span><span id="o3">–</span>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>로봇에서 0.2초마다 갱신 · 폰 앱이 연결돼 있으면 영상/데이터가 안 나올 수 있어요</footer>
+
+<script>
+const $ = id => document.getElementById(id);
+function set(id, v){ const e=$(id); if(e) e.textContent = (v===undefined||v===null)?'–':v; }
+
+// 카메라: 최신 사진을 계속 받아 와서 교체 (스트림이 조용히 멈추는 문제 방지)
+const cam = $('cam');
+let camUrl = null;
+async function camLoop(){
+  try{
+    const r = await fetch('/frame', {cache:'no-store'});
+    const age = parseFloat(r.headers.get('X-Frame-Age'));
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    cam.src = url;
+    if(camUrl) URL.revokeObjectURL(camUrl);
+    camUrl = url;
+    $('camage').textContent = age < 0 ? '' : (age > 2 ? `⚠ 로봇 영상 ${age.toFixed(0)}초째 안 들어옴` : '실시간');
+    setTimeout(camLoop, 70);   // 약 12~14fps
+  }catch(e){
+    $('camage').textContent = '서버 연결 끊김';
+    setTimeout(camLoop, 1000);
+  }
+}
+camLoop();
+
+async function tick(){
+  try{
+    const r = await fetch('/data', {cache:'no-store'});
+    const d = await r.json();
+
+    $('status').textContent = d.status || '';
+    const ok = d.connected;
+    $('dot').style.color = ok ? 'var(--ok)' : 'var(--bad)';
+    $('dot').style.background = ok ? 'var(--ok)' : 'var(--bad)';
+
+    if(d.pos){
+      set('px', d.pos[0].toFixed(2)); set('py', d.pos[1].toFixed(2));
+      set('yaw', d.rpy[2].toFixed(2));
+      set('roll', d.rpy[0].toFixed(2)); set('pitch', d.rpy[1].toFixed(2));
+      set('height', d.height.toFixed(2));
+      set('vx', d.vel[0].toFixed(2)); set('vy', d.vel[1].toFixed(2));
+      if(d.foot_force) d.foot_force.forEach((f,i)=>set('f'+i, f));
+      if(d.obstacle) d.obstacle.forEach((o,i)=>set('o'+i, (typeof o==='number'? o.toFixed(2)+' m' : o)));
+    }
+    if(d.battery!==undefined){
+      set('battery', d.battery);
+      $('battbar').style.width = Math.max(0,Math.min(100,d.battery))+'%';
+      $('battbar').style.background = d.battery<20?'var(--bad)':d.battery<50?'var(--warn)':'var(--ok)';
+      set('voltage', d.voltage!==undefined ? '· '+d.voltage+'V' : '');
+    }
+  }catch(e){
+    $('status').textContent = '서버 연결 끊김';
+    $('dot').style.background = 'var(--bad)';
+  }
+}
+setInterval(tick, 200);
+tick();
+
+// ── LiDAR 지도: 로봇을 가운데 두고 위에서 본 모습 (반경 4m) ──
+const cv = $('map'), cx = cv.getContext('2d');
+const RANGE = 4; // m
+function drawMap(L){
+  const W = cv.width, H = cv.height, s = Math.min(W, H) / (2*RANGE);
+  cx.fillStyle = '#0a0d12'; cx.fillRect(0,0,W,H);
+  // 1m 격자
+  cx.strokeStyle = '#1b2230'; cx.lineWidth = 1;
+  for(let m=-RANGE*2; m<=RANGE*2; m++){
+    cx.beginPath(); cx.moveTo(W/2+m*s,0); cx.lineTo(W/2+m*s,H); cx.stroke();
+    cx.beginPath(); cx.moveTo(0,H/2+m*s); cx.lineTo(W,H/2+m*s); cx.stroke();
+  }
+  if(!L.robot){ cx.fillStyle='#8b97a7'; cx.font='16px sans-serif'; cx.fillText('LiDAR 데이터 대기 중…', 20, 30); return; }
+  const [rx, ry] = L.robot;
+  // 점: 로봇 기준 상대좌표, 화면 위쪽 = 월드 +x
+  cx.fillStyle = '#4c8dff';
+  for(const [x,y] of L.points){
+    const dx = x-rx, dy = y-ry;
+    if(Math.abs(dx)>RANGE*1.6 || Math.abs(dy)>RANGE*1.6) continue;
+    cx.fillRect(W/2 - dy*s - 1, H/2 - dx*s - 1, 2.5, 2.5);
+  }
+  // 로봇 (화살표 = 바라보는 방향)
+  const a = L.yaw || 0;
+  cx.save(); cx.translate(W/2, H/2); cx.rotate(-a);
+  cx.fillStyle = '#39d98a';
+  cx.beginPath(); cx.moveTo(0,-14); cx.lineTo(9,10); cx.lineTo(-9,10); cx.closePath(); cx.fill();
+  cx.restore();
+}
+async function lidarTick(){
+  try{
+    const L = await (await fetch('/lidar', {cache:'no-store'})).json();
+    drawMap(L);
+    $('lidarinfo').textContent = L.points.length ? `${L.points.length}점 · ${L.age}초 전` : '';
+  }catch(e){}
+}
+setInterval(lidarTick, 500);
+lidarTick();
+</script>
+</body>
+</html>

@@ -1,0 +1,4 @@
+unitree_webrtc_connect==2.2.0
+flask
+opencv-python
+numpy

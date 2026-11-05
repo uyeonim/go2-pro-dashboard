@@ -1,0 +1,16 @@
+# 비밀 정보
+.env
+make_doc.py
+*.pdf
+
+# 실행 결과물
+logs/
+captures/
+
+# 환경 / 캐시
+.venv/
+__pycache__/
+*.pyc
+
+# 키 받을 때만 쓴 외부 저장소 복사본
+unitree_ui/
