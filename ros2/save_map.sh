@@ -10,3 +10,6 @@ source /opt/ros/jazzy/setup.bash
 ros2 run nav2_map_server map_saver_cli -f "$DIR/maps/$NAME" --ros-args -p save_map_timeout:=10.0
 python3 -c "import cv2,sys; cv2.imwrite(sys.argv[1]+'.png', cv2.imread(sys.argv[1]+'.pgm', -1))" "$DIR/maps/$NAME" \
   && echo "✅ 저장: maps/$NAME.png (.pgm, .yaml)"
+# 나중에 이어 그리기용 (continue_map.sh 가 이걸 불러옴)
+ros2 service call /slam_toolbox/serialize_map slam_toolbox/srv/SerializePoseGraph "{filename: '$DIR/maps/$NAME'}" >/dev/null \
+  && echo "✅ 이어 그리기용: maps/$NAME.posegraph (.data)"
