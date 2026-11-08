@@ -41,7 +41,68 @@ apply_safe_speed() {
     -e "s/^(\s*acc_lim_theta:).*/\1 1.5/" \
     -e "s/^(\s*decel_lim_x:).*/\1 -0.8/" \
     -e "s/^(\s*decel_lim_theta:).*/\1 -1.5/" \
+    -e 's#plugin: "(nav2_[a-z_]+)/([A-Za-z0-9]+)"#plugin: "\1::\2"#' \
     "$f"
+  # 무선(WebRTC)이라 로봇 데이터가 ~1초 늦게 옴 → 시간 허용치를 넉넉히 (기본값이면 "too old"로 목표 포기)
+  sed -i -E 's/^(\s*transform_tolerance:).*/\1 1.0/' "$f"
+  sed -i -E '/^controller_server:/,/ros__parameters:/ s/(ros__parameters:.*)/\1\n    costmap_update_timeout: 3.0/' "$f"
+  sed -i -E '/^\s+(local|global)_costmap:\s*$/,/ros__parameters:/ s/^(\s*)ros__parameters:.*/&\n\1  transform_tolerance: 1.0/' "$f"
+  # 느림 해결: 제어 주기 3Hz → 10Hz (3Hz면 로봇이 멈칫멈칫), sim_time 끄기
+  sed -i -E -e 's/^(\s*controller_frequency:).*/\1 10.0/' -e 's/^(\s*use_sim_time:).*/\1 False/' "$f"
+  # 위치 추정(AMCL): 찍어준 위치를 덜 믿고 라이다로 더 자주 고치게
+  sed -i -E \
+    -e 's/^(\s*update_min_d:).*/\1 0.1/' \
+    -e 's/^(\s*update_min_a:).*/\1 0.1/' \
+    -e 's/^(\s*recovery_alpha_slow:).*/\1 0.001/' \
+    -e 's/^(\s*recovery_alpha_fast:).*/\1 0.1/' \
+    -e 's/^(\s*laser_likelihood_max_dist:).*/\1 2.0/' \
+    "$f"
+  # Jazzy bt_navigator는 기본 BT 플러그인을 자동으로 불러옴 → 목록이 있으면 "already registered"로 죽음
+  sed -i '/^\s*plugin_lib_names:/,/^$/{/^$/!d}' "$f"
+  # Jazzy는 플러그인 이름을 "패키지::클래스"로만 받음 (원본의 "패키지/클래스"는 planner가 죽음)
+  # 지도 경로: run_nav.sh가 MAP_YAML을 주면 map_server에 직접 넣음
+  [ -n "$MAP_YAML" ] && sed -i -E "s#^(\s*yaml_filename:).*#\1 \"$MAP_YAML\"#" "$f"
+  # Jazzy Nav2에 새로 생긴 노드 설정 (원본 SDK 파일엔 없어서 시작이 멈춤)
+  cat >> "$f" <<'YAML'
+
+collision_monitor:
+  ros__parameters:
+    base_frame_id: "base_link"
+    odom_frame_id: "odom"
+    cmd_vel_in_topic: "cmd_vel_smoothed"
+    cmd_vel_out_topic: "cmd_vel"
+    state_topic: "collision_monitor_state"
+    transform_tolerance: 1.0
+    source_timeout: 3.0
+    base_shift_correction: True
+    stop_pub_timeout: 2.0
+    polygons: ["FrontStop"]
+    FrontStop:
+      type: "polygon"
+      points: "[[0.6, 0.25], [0.6, -0.25], [0.38, -0.25], [0.38, 0.25]]"
+      action_type: "stop"
+      min_points: 4
+      visualize: True
+      polygon_pub_topic: "collision_front_stop"
+      # 꺼 둠: 라이다가 로봇 자기 몸/다리를 장애물로 봐서 계속 "정지"를 걸었음 (리모컨 L2+B로 비상정지)
+      enabled: False
+    observation_sources: ["scan"]
+    scan:
+      type: "scan"
+      topic: "scan"
+      min_height: 0.05
+      max_height: 1.0
+      enabled: False
+
+docking_server:
+  ros__parameters:
+    dock_plugins: ["simple_dock"]
+    simple_dock:
+      plugin: "opennav_docking::SimpleChargingDock"
+YAML
+  # twist_mux: Jazzy 기본값(use_stamped=true)이면 Nav2/드라이버(Twist)와 형식이 달라 명령이 로봇에 안 감
+  local tm="$SDK/config/twist_mux.yaml"
+  grep -q use_stamped "$tm" || sed -i '/^\/twist_mux:/,/ros__parameters:/ s/ros__parameters:.*/ros__parameters:\n    use_stamped: false/' "$tm"
   # --symlink-install이 아니라 복사본이 설치돼 있으면 그것도 맞춤
   local inst=~/go2_ws/install/go2_robot_sdk/share/go2_robot_sdk/config/nav2_params.yaml
   [ -f "$inst" ] && [ ! -L "$inst" ] && cp "$f" "$inst"

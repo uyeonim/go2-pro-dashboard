@@ -8,7 +8,7 @@ source "$(dirname "$0")/nav_common.sh"
 NAME="${1:?지도 이름을 주세요. 예: run_nav.sh lab}"
 MAP="$DIR/maps/$NAME.yaml"
 [ -f "$MAP" ] || { echo "❌ 지도가 없어요: $MAP  (먼저 save_map.sh $NAME)"; ls "$DIR/maps" 2>/dev/null; exit 1; }
-apply_safe_speed
+MAP_YAML="$MAP" apply_safe_speed
 safety_banner
 echo "🗺 지도: $MAP"
 cd ~/go2_ws
