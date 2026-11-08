@@ -88,7 +88,26 @@ bash /mnt/c/Users/yeonwoo/robotdog/ros2/run_detector.sh   # 다른 WSL 창에서
 
 - 사물 인식은 PyTorch(GPU, 약 3GB)를 씁니다. 지도만 필요하면 `SKIP_TORCH=1 bash .../setup_wsl.sh`로 건너뛸 수 있습니다.
 
-### Nav2로 정해진 경로 주행
+## 정해진 경로 주행 (추천: 로봇 자체 위치 odom)
+
+`경로주행.bat`을 더블클릭하면 메뉴가 나옵니다. ROS 없이 로봇이 보내는 자기 위치(odom)만으로 경로를 따라 걷습니다.
+
+```bash
+.venv\Scripts\python route_drive.py line --dist 1       # 앞으로 1m 갔다 오기 (첫 테스트)
+.venv\Scripts\python route_drive.py square --size 1     # 1m 정사각형
+.venv\Scripts\python route_drive.py record lab1         # 리모컨으로 걸으며 경로 녹화 → Ctrl+C로 저장
+.venv\Scripts\python route_drive.py run lab1 --loop 3   # 녹화한 경로 3바퀴
+.venv\Scripts\python route_drive.py square --sim        # 로봇 없이 시뮬레이션
+```
+
+- 좌표는 **출발할 때 로봇 기준**(x 앞, y 왼쪽)입니다. 녹화한 경로는 **같은 자리·방향에서 출발**해야 같은 길을 걷습니다 (바닥에 테이프 표시 추천).
+- 결과: `routes/logs/<시각>_<경로>.csv`(실제 위치) + `.png`(계획 파랑 vs 실제 빨강).
+- 안전: 기본 최고 0.3 m/s(`--speed`로 최대 0.6), Ctrl+C 즉시 정지, 위치 데이터가 0.5초 넘게 끊기면 자동 정지, 한 지점에 40초 넘게 걸리면 중단.
+- 대시보드·ROS·폰 앱은 꺼 두세요 (로봇 연결은 1개만).
+
+왜 Nav2 대신 이걸 쓰나: Go2 Pro는 라이다를 무선(WebRTC)으로 1초가량 늦게, 가끔 끊기며 보내서 Nav2(실시간 센서 가정)가 자주 실패했습니다 (costmap 갱신 시간 초과, 위치 튐, 자기 몸을 장애물로 인식). odom은 초당 15~30번 꾸준히 와서 몇 m 범위의 실내 주행에 충분히 정확합니다.
+
+### (참고) Nav2로 주행
 
 모든 명령은 `wsl -d Ubuntu-24.04 bash /mnt/c/Users/yeonwoo/robotdog/ros2/...` 형식으로 실행합니다.
 
@@ -96,7 +115,7 @@ bash /mnt/c/Users/yeonwoo/robotdog/ros2/run_detector.sh   # 다른 WSL 창에서
 |---|---|---|
 | 1 | `run_nav_live.sh` | 실시간 지도 + Nav2. RViz의 **Nav2 Goal**로 목표를 찍어 첫 시험 |
 | 2 | `save_map.sh lab` | 지도를 `maps/lab.yaml`로 저장 |
-| 3 | `run_nav.sh lab` | 저장한 지도 + AMCL. RViz의 **2D Pose Estimate**로 시작 위치 지정 |
+| 3 | `run_nav_map.sh lab` | 저장한 지도 + slam_toolbox 위치추정 (AMCL보다 덜 튐). 지도 딸 때 출발 자리에서 켜거나 **2D Pose Estimate**로 지정 |
 | 4 | `route.sh record lab_loop` | RViz의 **Publish Point**로 찍은 점들을 `routes/lab_loop.yaml`로 저장 |
 | 5 | `route.sh follow lab_loop` | 경로를 차례로 주행 (`--loop` 반복, 1번 모드에서는 `--live`) |
 
