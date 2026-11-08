@@ -106,6 +106,30 @@
   @keyframes spin{to{transform:rotate(360deg)}}
   @keyframes blink{50%{opacity:.2}}
   footer{color:var(--muted);font-size:11px;text-align:center;padding:10px}
+
+  /* 자율 이동 */
+  .btn.on{color:#fff;background:var(--accent);border-color:var(--accent)}
+  .mapwrap{position:relative}
+  .mapwrap.pick canvas{cursor:crosshair}
+  .maphint{position:absolute;left:10px;top:10px;font-size:12px;padding:5px 9px;border-radius:8px;
+           background:rgba(14,17,22,.8);border:1px solid var(--line);color:var(--muted);pointer-events:none}
+  .zoom{position:absolute;right:10px;bottom:10px;display:flex;flex-direction:column;gap:4px}
+  .zoom .btn{width:30px;padding:4px 0;font-size:15px;font-weight:700}
+  .navbar{display:flex;align-items:center;gap:10px;padding:8px 12px;border-top:1px solid var(--line);font-size:13px;flex-wrap:wrap}
+  .navbar .msg{flex:1;min-width:160px}
+  .navbar.run{background:color-mix(in srgb,var(--accent) 10%,var(--panel))}
+  .navbar.done{background:color-mix(in srgb,var(--ok) 10%,var(--panel))}
+  .navbar.fail{background:color-mix(in srgb,var(--bad) 12%,var(--panel))}
+  .btn.stop{color:#fff;background:var(--bad);border-color:var(--bad);font-size:14px;font-weight:700;padding:7px 16px}
+  .navbar label{display:flex;align-items:center;gap:5px;color:var(--muted);font-size:12px}
+  .side{display:flex;flex-direction:column;gap:16px}
+  .routes li{flex-wrap:wrap}
+  .routes .meta{color:var(--muted);font-size:11.5px}
+  .routes input[type=number]{width:44px;font:inherit;font-size:12px;padding:3px 4px;border-radius:6px;border:1px solid var(--line);
+                             background:var(--bg);color:var(--text)}
+  .routes select,.rhead select{font:inherit;font-size:12px;padding:3px 4px;border-radius:6px;border:1px solid var(--line);
+                  background:var(--panel);color:var(--text);text-transform:none;letter-spacing:0}
+  .rnote{font-size:11.5px;color:var(--muted);padding:8px 16px 0;line-height:1.5}
 </style>
 </head>
 <body>
@@ -134,9 +158,28 @@
     </section>
     <section class="card" id="c-map">
       <h2>LiDAR · 위에서 본 지도 <span id="lidarinfo" class="sub"></span>
-        <span class="acts"><button class="btn" id="b-trail" title="지나온 경로 지우기">경로 지우기</button></span>
+        <span class="acts">
+          <button class="btn hidden" id="b-goto" title="켜고 지도를 클릭하면 로봇이 그곳으로 걸어가요">🎯 클릭 이동</button>
+          <button class="btn hidden" id="b-draft" title="지도를 차례로 클릭해서 경로를 만들어 저장해요">✏️ 경로 만들기</button>
+          <button class="btn" id="b-trail" title="지나온 경로 지우기">경로 지우기</button>
+        </span>
       </h2>
-      <div class="mapwrap"><canvas id="map" width="800" height="500"></canvas></div>
+      <div class="mapwrap"><canvas id="map" width="800" height="500"></canvas>
+        <div class="maphint hidden" id="maphint"></div>
+        <div class="zoom"><button class="btn" id="z-in" title="확대">+</button><button class="btn" id="z-out" title="축소">−</button></div>
+      </div>
+      <div class="navbar hidden" id="draftbar">
+        <span class="msg" id="draftmsg"></span>
+        <label><input type="checkbox" id="d-return" checked> 출발점으로 돌아오기</label>
+        <button class="btn" id="d-undo">되돌리기</button>
+        <button class="btn" id="d-save">저장</button>
+        <button class="btn" id="d-cancel">취소</button>
+      </div>
+      <div class="navbar hidden" id="navbar">
+        <span class="msg" id="navmsg"></span>
+        <button class="btn stop hidden" id="b-stop" title="단축키: Esc 또는 스페이스">⛔ 정지</button>
+        <button class="btn hidden" id="b-navok">확인</button>
+      </div>
       <div class="ov" id="ov-map"></div>
     </section>
 </main>
@@ -177,10 +220,21 @@
       <div class="ov" id="ov-sen"></div>
     </section>
 
+  <div class="side">
+    <section class="card hidden" id="c-routes">
+      <h2>저장한 경로
+        <span class="acts rhead"><select id="speed" title="걷는 최고 속도">
+          <option value="0.25">느리게 0.25m/s</option><option value="0.35" selected>보통 0.35m/s</option><option value="0.5">빠르게 0.5m/s</option>
+        </select></span>
+      </h2>
+      <div class="rnote">로봇을 <b>경로 만들 때 서 있던 자리·방향</b>에 두고 ▶를 누르세요. 👁로 지도에 미리 볼 수 있어요.</div>
+      <ul class="files routes" id="routelist"><li class="empty">아직 저장한 경로가 없어요. 지도 위 ✏️ 경로 만들기로 만들어요.</li></ul>
+    </section>
     <section class="card" id="c-rec">
       <h2>녹화 파일 <span class="sub">(영상 mp4 + 센서 CSV)</span></h2>
       <ul class="files" id="reclist"><li class="empty">아직 녹화한 파일이 없어요.</li></ul>
     </section>
+  </div>
 </div>
 
 <footer>로봇은 한 번에 하나만 연결돼요 (폰 앱은 꺼 두세요) · 영상 mp4는 내려받아서 재생하세요</footer>
@@ -214,6 +268,9 @@ const LiveAPI = {
   recStop: async () => (await fetch('/record/stop', {method:'POST'})).json(),
   recordings: async () => (await fetch('/recordings', {cache:'no-store'})).json(),
   trailClear: async () => (await fetch('/trail/clear', {method:'POST'})).json(),
+  post: async (url, body) => (await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'},
+                                                body: JSON.stringify(body || {})})).json(),
+  routes: async () => (await fetch('/routes', {cache:'no-store'})).json(),
   // 서버가 밀어 보내는 영상 스트림을 읽어서 표시 (3초간 새 프레임이 없으면 다시 연결)
   startCamera(show){
     let ctrl = null, last = Date.now();
@@ -387,6 +444,7 @@ async function tick(){
     if(e.message !== 'login'){ serverUp = false; if(!downSince) downSince = Date.now(); }
   }
   render();
+  renderNav();
 }
 
 // ── 카메라 (live: 서버 스트림 / demo: 브라우저 그림) ──
@@ -472,17 +530,20 @@ async function loadRecordings(){
 
 // ── LiDAR 지도: 로봇을 가운데 두고 위에서 본 모습 (반경 4m) + 지나온 경로 ──
 const cv = $('map'), cx = cv.getContext('2d');
-const RANGE = 4; // m
+let RANGE = 4; // m (화면 위아래 반경, +/− 버튼과 마우스 휠로 바꿈)
+let view = null, lastL = null;  // 클릭 좌표 → 월드 좌표 변환용
 function drawMap(L){
+  lastL = L;
   const W = cv.width, H = cv.height, s = Math.min(W, H) / (2*RANGE);
   cx.fillStyle = '#0a0d12'; cx.fillRect(0,0,W,H);
   cx.strokeStyle = '#1b2230'; cx.lineWidth = 1;   // 1m 격자
-  for(let m=-RANGE*2; m<=RANGE*2; m++){
+  for(let m=-Math.ceil(RANGE*2); m<=RANGE*2; m++){
     cx.beginPath(); cx.moveTo(W/2+m*s,0); cx.lineTo(W/2+m*s,H); cx.stroke();
     cx.beginPath(); cx.moveTo(0,H/2+m*s); cx.lineTo(W,H/2+m*s); cx.stroke();
   }
   if(!L.robot) return;
   const [rx, ry] = L.robot;
+  view = {rx, ry, s, W, H, yaw: L.yaw || 0};
   const P = (x,y) => [W/2 - (y-ry)*s, H/2 - (x-rx)*s];   // 화면 위쪽 = 월드 +x
   cx.fillStyle = '#4c8dff';
   for(const [x,y] of L.points){
@@ -497,6 +558,7 @@ function drawMap(L){
     const [u0,v0] = P(...L.trail[0]);            // 출발점
     cx.fillStyle = '#ffb020'; cx.beginPath(); cx.arc(u0, v0, 5, 0, Math.PI*2); cx.fill();
   }
+  drawNavLayers(P);
   const a = L.yaw || 0;                          // 로봇 (화살표 = 바라보는 방향)
   cx.save(); cx.translate(W/2, H/2); cx.rotate(-a);
   cx.fillStyle = '#39d98a';
@@ -513,6 +575,178 @@ async function lidarTick(){
     if(L.trail_len > 0) parts.push(`이동 ${L.trail_len.toFixed(1)}m`);
     $('lidarinfo').textContent = parts.join(' · ');
   }catch(e){}
+}
+
+// ── 자율 이동: 지도 클릭 이동 / 경로 만들기·저장·실행 (노트북 화면에서만) ──
+let pickMode = null;           // null | 'goto' | 'draft'
+let draft = null;              // {anchor:[x,y,yaw], pts:[[x,y],...]}
+let preview = null;            // 미리보기 중인 경로 {name, points(출발 기준)}
+let routesCache = [];
+let navSeenResult = null;      // 이미 '확인' 누른 결과
+const speedVal = () => parseFloat($('speed').value);
+
+function toWorld(lx, ly, pose){ const c = Math.cos(pose[2]), s = Math.sin(pose[2]);
+  return [pose[0] + c*lx - s*ly, pose[1] + s*lx + c*ly]; }
+
+function drawLine(P, pts, color, width, dash){
+  if(pts.length < 2) return;
+  cx.save(); cx.strokeStyle = color; cx.lineWidth = width; cx.setLineDash(dash || []); cx.lineJoin = 'round';
+  cx.beginPath(); pts.forEach(([x,y],i) => { const [u,v] = P(x,y); i ? cx.lineTo(u,v) : cx.moveTo(u,v); }); cx.stroke();
+  cx.restore();
+}
+function drawDots(P, pts, color, numbered){
+  pts.forEach(([x,y],i) => {
+    const [u,v] = P(x,y);
+    cx.fillStyle = color; cx.beginPath(); cx.arc(u, v, numbered ? 9 : 5, 0, Math.PI*2); cx.fill();
+    if(numbered){ cx.fillStyle = '#0a0d12'; cx.font = 'bold 11px Segoe UI, sans-serif'; cx.textAlign = 'center';
+      cx.textBaseline = 'middle'; cx.fillText(String(i+1), u, v+0.5); }
+  });
+}
+function drawNavLayers(P){
+  const n = D && D.nav;
+  if(preview && view){                                   // 저장한 경로 미리보기 (지금 위치를 출발점으로)
+    const pose = [view.rx, view.ry, view.yaw];
+    const w = preview.points.map(([a,b]) => toWorld(a, b, pose));
+    drawLine(P, [[view.rx, view.ry], ...w], 'rgba(190,140,255,.9)', 2, [6,5]);
+    drawDots(P, w, '#be8cff', true);
+  }
+  if(draft){                                             // 만들고 있는 경로
+    const pts = [[draft.anchor[0], draft.anchor[1]], ...draft.pts];
+    if($('d-return').checked && draft.pts.length) pts.push([draft.anchor[0], draft.anchor[1]]);
+    drawLine(P, pts, 'rgba(255,255,255,.85)', 2, [6,5]);
+    drawDots(P, draft.pts, '#ffffff', true);
+    const [u,v] = P(draft.anchor[0], draft.anchor[1]);
+    cx.strokeStyle = '#fff'; cx.lineWidth = 2; cx.beginPath(); cx.arc(u, v, 11, 0, Math.PI*2); cx.stroke();
+  }
+  if(n && n.active){                                     // 지금 가는 길
+    if(view) drawLine(P, [[view.rx, view.ry], ...n.path], 'rgba(57,217,138,.95)', 3);
+    drawDots(P, n.goals, '#39d98a', n.goals.length > 1);
+  }
+}
+
+// 지도 클릭 → 월드 좌표
+cv.addEventListener('click', async ev => {
+  if(!pickMode || !view) return;
+  const r = cv.getBoundingClientRect();
+  const u = (ev.clientX - r.left) * cv.width / r.width, v = (ev.clientY - r.top) * cv.height / r.height;
+  const x = view.rx + (view.H/2 - v) / view.s, y = view.ry + (view.W/2 - u) / view.s;
+  if(pickMode === 'goto'){
+    const j = await api.post('/nav/goto', {x, y, speed: speedVal()});
+    if(!j.ok) return toast(j.error || '이동을 시작하지 못했어요');
+    navSeenResult = null;
+    toast('그곳으로 이동해요 — 멈추려면 ⛔ 정지 (Esc)');
+  } else if(pickMode === 'draft'){
+    draft.pts.push([x, y]); renderDraft();
+  }
+  if(lastL) drawMap(lastL);
+});
+cv.addEventListener('wheel', ev => {
+  ev.preventDefault();
+  RANGE = Math.max(1.5, Math.min(15, RANGE * (ev.deltaY > 0 ? 1.15 : 1/1.15)));
+  if(lastL) drawMap(lastL);
+}, {passive:false});
+$('z-in').onclick = () => { RANGE = Math.max(1.5, RANGE/1.3); if(lastL) drawMap(lastL); };
+$('z-out').onclick = () => { RANGE = Math.min(15, RANGE*1.3); if(lastL) drawMap(lastL); };
+
+function setPick(mode){
+  pickMode = mode;
+  $('b-goto').classList.toggle('on', mode === 'goto');
+  $('b-draft').classList.toggle('on', mode === 'draft');
+  document.querySelector('.mapwrap').classList.toggle('pick', !!mode);
+  const hint = {goto:'가고 싶은 곳을 클릭하세요 (파란 점 = 장애물)', draft:'지나갈 지점을 차례로 클릭하세요'}[mode];
+  $('maphint').classList.toggle('hidden', !hint); if(hint) $('maphint').textContent = hint;
+}
+$('b-goto').onclick = () => { if(draft) return toast('경로 만들기를 먼저 끝내 주세요'); setPick(pickMode === 'goto' ? null : 'goto'); };
+$('b-draft').onclick = () => {
+  if(draft) return;                                     // 이미 만드는 중
+  if(!view) return toast('로봇 위치를 아직 몰라요');
+  draft = {anchor: [view.rx, view.ry, view.yaw], pts: []};
+  preview = null; renderRoutes();
+  setPick('draft'); renderDraft();
+};
+function renderDraft(){
+  $('draftbar').classList.toggle('hidden', !draft);
+  if(!draft) return;
+  const n = draft.pts.length;
+  $('draftmsg').innerHTML = n ? `<b>경로 만드는 중</b> · 지점 ${n}개 (흰 동그라미 = 출발점, 로봇의 지금 자리)`
+                              : '<b>경로 만드는 중</b> · 지도에서 지날 곳을 차례로 클릭하세요';
+  $('d-save').disabled = !n; $('d-undo').disabled = !n;
+}
+$('d-return').onchange = () => lastL && drawMap(lastL);
+$('d-undo').onclick = () => { draft.pts.pop(); renderDraft(); lastL && drawMap(lastL); };
+$('d-cancel').onclick = () => { draft = null; setPick(null); renderDraft(); lastL && drawMap(lastL); };
+$('d-save').onclick = async () => {
+  const name = (prompt('경로 이름 (한글·영어·숫자, 예: 연구실한바퀴)') || '').trim();
+  if(!name) return;
+  const pts = draft.pts.slice();
+  if($('d-return').checked) pts.push([draft.anchor[0], draft.anchor[1]]);
+  const j = await api.post('/routes/save', {name, anchor: draft.anchor, points: pts});
+  if(!j.ok) return toast(j.error || '저장하지 못했어요');
+  toast(`경로 '${name}' 저장했어요`);
+  draft = null; setPick(null); renderDraft(); loadRoutes();
+};
+
+async function loadRoutes(){
+  try{ routesCache = await api.routes(); }catch(e){ routesCache = []; }
+  renderRoutes();
+}
+function esc(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function renderRoutes(){
+  const busy = D && D.nav && D.nav.active;
+  $('routelist').innerHTML = routesCache.length ? routesCache.map((r,i) => `
+    <li><span class="nm"><b>${esc(r.name)}</b><br><span class="meta">${r.points.length}개 지점 · ${r.length}m</span></span>
+      <span style="margin-left:auto;display:flex;gap:5px;align-items:center">
+        <input type="number" min="1" max="20" value="1" id="lp${i}" title="몇 바퀴">바퀴
+        <button class="btn ${preview && preview.name===r.name ? 'on':''}" data-pv="${i}" title="지도에 미리보기">👁</button>
+        <button class="btn" data-run="${i}" ${busy?'disabled':''} title="지금 자리를 출발점으로 주행">▶</button>
+        <button class="btn" data-del="${i}" title="삭제">🗑</button></span></li>`).join('')
+    : '<li class="empty">아직 저장한 경로가 없어요. 지도 위 ✏️ 경로 만들기로 만들어요.</li>';
+}
+$('routelist').addEventListener('click', async ev => {
+  const b = ev.target.closest('button'); if(!b) return;
+  if(b.dataset.pv !== undefined){
+    const r = routesCache[+b.dataset.pv];
+    preview = preview && preview.name === r.name ? null : r;
+    renderRoutes(); lastL && drawMap(lastL);
+  } else if(b.dataset.run !== undefined){
+    const i = +b.dataset.run, r = routesCache[i], loops = Math.max(1, parseInt($('lp'+i).value) || 1);
+    if(!confirm(`'${r.name}' 경로를 ${loops}바퀴 걸어요.\n로봇이 경로 만들 때의 출발 자리·방향에 있나요?\n(리모컨 비상정지 L2+B 준비)`)) return;
+    const j = await api.post('/nav/run', {name: r.name, loops, speed: speedVal()});
+    if(!j.ok) return toast(j.error || '시작하지 못했어요');
+    navSeenResult = null; preview = null; renderRoutes();
+  } else if(b.dataset.del !== undefined){
+    const r = routesCache[+b.dataset.del];
+    if(!confirm(`'${r.name}' 경로를 지울까요?`)) return;
+    await api.post('/routes/delete', {name: r.name}); if(preview && preview.name === r.name) preview = null; loadRoutes();
+  }
+});
+
+async function navStop(){ try{ await api.post('/nav/stop'); }catch(e){} toast('정지했어요'); }
+$('b-stop').onclick = navStop;
+$('b-navok').onclick = () => { navSeenResult = D && D.nav && D.nav.result + D.nav.msg; renderNav(); };
+document.addEventListener('keydown', ev => {
+  if((ev.key === 'Escape' || ev.key === ' ') && D && D.nav && D.nav.active && !/INPUT|TEXTAREA|SELECT/.test(ev.target.tagName)){
+    ev.preventDefault(); navStop();
+  } else if(ev.key === 'Escape'){ if(draft) $('d-cancel').click(); else setPick(null); }
+});
+
+let wasActive = false;
+function renderNav(){
+  if(MODE !== 'live' || !D) return;
+  const drive = !!D.can_drive && D.connected;
+  ['b-goto','b-draft'].forEach(id => $(id).classList.toggle('hidden', !D.can_drive));
+  $('c-routes').classList.toggle('hidden', !D.can_drive);
+  $('b-goto').disabled = $('b-draft').disabled = !drive;
+  if(!drive && pickMode === 'goto') setPick(null);
+  const n = D.nav || {};
+  const finished = !n.active && n.result && (n.result + n.msg) !== navSeenResult;
+  const bar = $('navbar');
+  bar.classList.toggle('hidden', !n.active && !finished);
+  bar.className = 'navbar' + ((!n.active && !finished) ? ' hidden' : n.active ? ' run' : n.result === 'done' ? ' done' : ' fail');
+  $('navmsg').textContent = n.active ? `${n.name ? n.name + ' · ' : ''}${n.msg}` : (n.msg || '');
+  $('b-stop').classList.toggle('hidden', !n.active);
+  $('b-navok').classList.toggle('hidden', !!n.active);
+  if(wasActive !== !!n.active){ wasActive = !!n.active; renderRoutes(); }
 }
 
 // ── 고정 주소 입구: 노트북의 실제 대시보드가 켜져 있으면 그리로 이동 ──
@@ -539,6 +773,7 @@ function start(){
   if(!camVid) api.startCamera(showFrame);
   startFpsLabel();
   loadRecordings();
+  if(MODE === 'live') loadRoutes();
 }
 
 (async function boot(){

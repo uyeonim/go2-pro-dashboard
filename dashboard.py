@@ -13,7 +13,9 @@ import asyncio
 import csv
 import hashlib
 import hmac
+import json
 import logging
+import re
 import math
 import os
 import threading
@@ -25,8 +27,9 @@ import cv2
 import numpy as np
 from flask import Flask, Response, jsonify, redirect, request, send_from_directory, session
 
+from navigator import Navigator
 from sensors import make_conn  # import 시 .env도 읽음
-from unitree_webrtc_connect import RTC_TOPIC
+from unitree_webrtc_connect import RTC_TOPIC, SPORT_CMD
 
 # 접속 정보는 .env에서 읽음 (sensors.py의 load_env). 코드에 키를 적지 않음.
 DEFAULT_IP = os.environ.get("UNITREE_ROBOT_IP")
@@ -37,6 +40,7 @@ PAGES_ORIGIN = os.environ.get("DASHBOARD_PAGES_ORIGIN", "https://uyeonim.github.
 BASE = os.path.dirname(os.path.abspath(__file__))
 REC_DIR = os.path.join(BASE, "recordings")   # 녹화(영상 + 센서 CSV)
 CAP_DIR = os.path.join(BASE, "captures")     # 사진
+ROUTE_DIR = os.path.join(BASE, "routes")     # 저장한 경로 (route_drive.py와 같은 형식)
 FRAME_W, JPEG_Q = 960, 75                    # 전송용 영상 크기/화질 (공개 주소에서도 가볍게)
 TRAIL_MAX = 3000                             # 경로 점 최대 개수
 LEGS = ["FR", "FL", "RR", "RL"]              # Go2 모터 순서: 다리별 (hip, thigh, calf)
@@ -45,6 +49,8 @@ state = {
     "sport": None, "sport_t": 0.0,
     "low": None, "low_t": 0.0,
     "lidar": [], "lidar_t": 0.0,      # 위에서 본 [x, y] 점 목록 (m, 월드 좌표)
+    "obs": np.zeros((0, 2)),          # 길 찾기용 LiDAR 점 전체 (화면용보다 촘촘)
+    "conn": None, "loop": None,       # 이동 명령을 보낼 로봇 연결
     "obstacle_lidar": None,           # LiDAR로 계산한 [앞, 왼쪽, 뒤, 오른쪽] 거리 (m)
     "trail": [],                      # 지나온 경로 [[x, y], ...]
     "status": "연결 대기 중...",
@@ -209,6 +215,10 @@ def update_lidar(pts):
     if s is not None and len(band):
         state["obstacle_lidar"] = lidar_obstacles(band[:, :2], s["position"][0], s["position"][1],
                                                   s["imu_state"]["rpy"][2])
+    obs = band[:, :2]
+    if len(obs) > 30000:
+        obs = obs[np.random.choice(len(obs), 30000, replace=False)]
+    state["obs"] = obs.astype(np.float32)
     if len(band) > 4000:
         band = band[np.random.choice(len(band), 4000, replace=False)]
     state["lidar"] = np.round(band[:, :2], 2).tolist()
@@ -266,7 +276,8 @@ def robot_thread(args):
                     sub("rt/utlidar/voxel_map_compressed", on_lidar)
                 except Exception as e:
                     log(f"LiDAR 시작 실패(영상/센서는 계속): {e}")
-                state.update(status="연결됨", connected=True, phase="connected", attempt=0, error=None)
+                state.update(status="연결됨", connected=True, phase="connected", attempt=0, error=None,
+                             conn=conn, loop=loop)
                 log("✅ 연결됨 — 센서/영상 수신 시작")
 
                 # ── 감시: 연결이 닫히거나 데이터가 끊기면 정리 후 재연결 ──
@@ -284,8 +295,9 @@ def robot_thread(args):
                     else:
                         continue
                     break
+                nav.stop("로봇 연결 끊김")
                 state.update(connected=False, phase="reconnecting", error=reason,
-                             status=f"{reason} — 재연결 중...")
+                             status=f"{reason} — 재연결 중...", conn=None)
                 log(f"⚠ {reason} → 재연결")
                 try:
                     await asyncio.wait_for(conn.disconnect(), timeout=5)
@@ -318,6 +330,9 @@ def _demo_room():
     return np.array(pts)
 
 
+sim = {"manual": False, "cmd": (0.0, 0.0), "cmd_t": 0.0, "x": 0.0, "y": 0.0, "yaw": 0.0, "vx": 0.0, "vyaw": 0.0}
+
+
 def demo_thread():
     state.update(demo=True, phase="connecting", attempt=1, status="데모: 가상 로봇에 연결 중...")
     time.sleep(2)  # 연결 중 화면 확인용
@@ -326,12 +341,26 @@ def demo_thread():
     room = _demo_room()
     t0 = time.time()
     last_cam = last_lidar = 0.0
+    t_prev = time.time()
     while True:
         t = time.time() - t0
-        w = 0.15                                        # 타원 경로를 천천히 돎
-        x, y = 1.6 * math.cos(w * t), 1.0 * math.sin(w * t)
-        vx, vy = -1.6 * w * math.sin(w * t), 1.0 * w * math.cos(w * t)
-        yaw = math.atan2(vy, vx)
+        dt, t_prev = time.time() - t_prev, time.time()
+        w = 0.15
+        if not sim["manual"]:                           # 평소: 타원 경로를 천천히 돎
+            x, y = 1.6 * math.cos(w * t), 1.0 * math.sin(w * t)
+            vx, vy = -1.6 * w * math.sin(w * t), 1.0 * w * math.cos(w * t)
+            yaw = math.atan2(vy, vx)
+            sim.update(x=x, y=y, yaw=yaw)
+        else:                                           # 이동 명령을 받은 뒤: 명령대로 걷는 가짜 로봇
+            cvx, cvyaw = sim["cmd"] if time.time() - sim["cmd_t"] < 0.5 else (0.0, 0.0)
+            a = min(1.0, dt / 0.3)                      # 실제 로봇처럼 0.3초쯤 늦게 반응
+            sim["vx"] += (cvx - sim["vx"]) * a
+            sim["vyaw"] += (cvyaw - sim["vyaw"]) * a
+            sim["yaw"] = (sim["yaw"] + sim["vyaw"] * dt + math.pi) % (2 * math.pi) - math.pi
+            sim["x"] += sim["vx"] * math.cos(sim["yaw"]) * dt
+            sim["y"] += sim["vx"] * math.sin(sim["yaw"]) * dt
+            x, y, yaw = sim["x"], sim["y"], sim["yaw"]
+            vx, vy, w = sim["vx"] * math.cos(yaw), sim["vx"] * math.sin(yaw), sim["vyaw"]
         update_sport({
             "position": [x, y, 0.30], "body_height": 0.32,
             "velocity": [vx, vy, 0.0], "yaw_speed": w,
@@ -444,6 +473,167 @@ class Recorder:
 recorder = Recorder()
 
 
+# ───────────────────────── 자율 이동 (지도 클릭 / 경로) ─────────────────────────
+def _pose():
+    s = state["sport"]
+    if s is None:
+        return None
+    return s["position"][0], s["position"][1], s["imu_state"]["rpy"][2], state["sport_t"]
+
+
+def _sport_cmd(api, param=None):
+    """로봇에 스포츠 명령 보내기 (응답은 기다리지 않음). 데모에서는 가짜 로봇으로."""
+    if state["demo"]:
+        if api == "Move":
+            sim.update(manual=True, cmd=(param["x"], param["z"]), cmd_t=time.time())
+        else:
+            sim.update(cmd=(0.0, 0.0), cmd_t=time.time())
+        return
+    conn, loop = state["conn"], state["loop"]
+    if conn is None or loop is None:
+        return
+    opts = {"api_id": SPORT_CMD[api]}
+    if param is not None:
+        opts["parameter"] = param
+
+    async def send():
+        try:
+            await asyncio.wait_for(conn.datachannel.pub_sub.publish_request_new(RTC_TOPIC["SPORT_MOD"], opts), 1.0)
+        except Exception:
+            pass
+    asyncio.run_coroutine_threadsafe(send(), loop)
+
+
+nav = Navigator(
+    get_pose=_pose,
+    get_obstacles=lambda: (state["obs"], state["lidar_t"]),
+    send_move=lambda vx, vyaw: _sport_cmd("Move", {"x": round(vx, 3), "y": 0, "z": round(vyaw, 3)}),
+    send_stop=lambda: _sport_cmd("StopMove"),
+    log=log,
+)
+
+
+def can_drive():
+    """로봇을 움직이는 기능은 이 노트북 화면(127.0.0.1)에서만. 공개 주소(Tailscale/Cloudflare)로 온 요청은 막음."""
+    if request.remote_addr not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+        return False
+    proxied = ("X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "Forwarded",
+               "Tailscale-Funnel-Request", "Tailscale-User-Login", "Cf-Connecting-Ip", "Cf-Ray")
+    if any(h in request.headers for h in proxied):
+        return False
+    host = request.host.rsplit(":", 1)[0] if not request.host.startswith("[") else request.host.split("]")[0] + "]"
+    return host in ("127.0.0.1", "localhost", "[::1]")
+
+
+def _drive_guard():
+    if not can_drive():
+        return jsonify({"ok": False, "error": "로봇 이동은 노트북 화면(127.0.0.1)에서만 할 수 있어요"}), 403
+    if not state["connected"] or _pose() is None:
+        return jsonify({"ok": False, "error": "로봇이 연결돼 있지 않아요"}), 409
+    return None
+
+
+def _route_path(name):
+    if not re.fullmatch(r"[\w\-가-힣]{1,40}", name or ""):
+        return None
+    return os.path.join(ROUTE_DIR, name + ".json")
+
+
+def _load_route(name):
+    p = _route_path(name)
+    if not p or not os.path.exists(p):
+        return None
+    with open(p, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _local_to_world(pts, pose):
+    x0, y0, yaw0 = pose[0], pose[1], pose[2]
+    c, s = math.cos(yaw0), math.sin(yaw0)
+    return [(x0 + c * lx - s * ly, y0 + s * lx + c * ly) for lx, ly in pts]
+
+
+@app.route("/nav/goto", methods=["POST"])
+def nav_goto():
+    bad = _drive_guard()
+    if bad:
+        return bad
+    j = request.get_json(force=True)
+    nav.start([(float(j["x"]), float(j["y"]))], name="클릭 이동", speed=j.get("speed"))
+    log(f"🎯 클릭 이동: ({j['x']:.2f}, {j['y']:.2f})")
+    return jsonify({"ok": True})
+
+
+@app.route("/nav/run", methods=["POST"])
+def nav_run():
+    bad = _drive_guard()
+    if bad:
+        return bad
+    j = request.get_json(force=True)
+    r = _load_route(j.get("name"))
+    if not r:
+        return jsonify({"ok": False, "error": "경로를 찾을 수 없어요"}), 404
+    goals = _local_to_world(r["points"], _pose())     # 지금 로봇 자리·방향을 경로의 출발점으로
+    nav.start(goals, loops=j.get("loops", 1), name=r["name"], speed=j.get("speed"))
+    log(f"▶ 경로 주행: {r['name']} ({len(goals)}개 지점, {j.get('loops', 1)}바퀴)")
+    return jsonify({"ok": True})
+
+
+@app.route("/nav/stop", methods=["POST"])
+def nav_stop():
+    nav.stop("정지 버튼")      # 정지는 누구든 (공개 주소에서도) 누를 수 있게
+    return jsonify({"ok": True})
+
+
+@app.route("/routes")
+def routes_list():
+    out = []
+    if os.path.isdir(ROUTE_DIR):
+        for fn in sorted(os.listdir(ROUTE_DIR)):
+            if fn.endswith(".json"):
+                try:
+                    r = _load_route(fn[:-5])
+                    pts = r["points"]
+                    length = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip([(0, 0)] + pts, pts))
+                    out.append({"name": r["name"], "points": pts, "length": round(length, 1),
+                                "created": r.get("created", "")})
+                except Exception:
+                    continue
+    return jsonify(out)
+
+
+@app.route("/routes/save", methods=["POST"])
+def routes_save():
+    if not can_drive():
+        return jsonify({"ok": False, "error": "경로 저장은 노트북 화면에서만 할 수 있어요"}), 403
+    j = request.get_json(force=True)
+    p = _route_path(j.get("name"))
+    if not p:
+        return jsonify({"ok": False, "error": "이름은 한글·영어·숫자·_·- 로 40자까지"}), 400
+    ax, ay, ayaw = j["anchor"]
+    c, s = math.cos(ayaw), math.sin(ayaw)
+    pts = []
+    for wx, wy in j["points"]:                         # 월드 → 출발 기준(앞 x, 왼쪽 y)
+        dx, dy = wx - ax, wy - ay
+        pts.append([round(c * dx + s * dy, 3), round(-s * dx + c * dy, 3)])
+    os.makedirs(ROUTE_DIR, exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump({"name": j["name"], "frame": "start: x=forward, y=left (m)",
+                   "created": time.strftime("%Y-%m-%dT%H:%M:%S"), "points": pts}, f, ensure_ascii=False, indent=1)
+    log(f"💾 경로 저장: routes/{j['name']}.json ({len(pts)}개 지점)")
+    return jsonify({"ok": True})
+
+
+@app.route("/routes/delete", methods=["POST"])
+def routes_delete():
+    if not can_drive():
+        return jsonify({"ok": False, "error": "노트북 화면에서만 할 수 있어요"}), 403
+    p = _route_path(request.get_json(force=True).get("name"))
+    if p and os.path.exists(p):
+        os.remove(p)
+    return jsonify({"ok": True})
+
+
 # ───────────────────────── 웹 API ─────────────────────────
 @app.route("/")
 def index():
@@ -549,6 +739,7 @@ def data():
         "video_age": age(_latest_t[0]), "sport_age": age(state["sport_t"]),
         "lidar_age": age(state["lidar_t"]), "recording": recorder.status(),
         "obstacle_lidar": state["obstacle_lidar"],
+        "can_drive": can_drive(), "nav": nav.status(),
     }
     if s is not None:
         out.update({
