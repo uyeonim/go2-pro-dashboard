@@ -253,7 +253,8 @@ def draw(plan, trail, path, title):
     cv2.putText(img, f"route: {title}   grid {g}m", (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (60, 60, 60), 1, cv2.LINE_AA)
     cv2.putText(img, "blue = plan   red = actual   green = start (facing)", (12, H - 14),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (60, 60, 60), 1, cv2.LINE_AA)
-    cv2.imwrite(path, img)
+    with open(path, "wb") as f:                     # cv2.imwrite는 한글 파일 이름을 못 씀
+        f.write(cv2.imencode(".png", img)[1].tobytes())
     return path
 
 

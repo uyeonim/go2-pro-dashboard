@@ -110,6 +110,8 @@
   /* 자율 이동 */
   .btn.on{color:#fff;background:var(--accent);border-color:var(--accent)}
   .mapwrap{position:relative}
+  #c-map h2{flex-wrap:wrap}
+  #c-map .acts{flex-wrap:wrap;justify-content:flex-end}
   .mapwrap.pick canvas{cursor:crosshair}
   .maphint{position:absolute;left:10px;top:10px;font-size:12px;padding:5px 9px;border-radius:8px;
            background:rgba(14,17,22,.8);border:1px solid var(--line);color:var(--muted);pointer-events:none}
@@ -159,6 +161,7 @@
     <section class="card" id="c-map">
       <h2>LiDAR · 위에서 본 지도 <span id="lidarinfo" class="sub"></span>
         <span class="acts">
+          <button class="btn hidden" id="b-keys" title="켜면 키보드 방향키로 로봇을 조종해요">🎮 방향키</button>
           <button class="btn hidden" id="b-goto" title="켜고 지도를 클릭하면 로봇이 그곳으로 걸어가요">🎯 클릭 이동</button>
           <button class="btn hidden" id="b-draft" title="지도를 차례로 클릭해서 경로를 만들어 저장해요">✏️ 경로 만들기</button>
           <button class="btn" id="b-trail" title="지나온 경로 지우기">경로 지우기</button>
@@ -221,6 +224,18 @@
     </section>
 
   <div class="side">
+    <section class="card hidden" id="c-dmap">
+      <h2>쌓은 지도 <span id="dmapinfo" class="sub"></span>
+        <span class="acts"><button class="btn" id="m-toggle" title="지나간 곳의 LiDAR 점을 계속 쌓기">쌓기 켜짐</button></span>
+      </h2>
+      <div class="rnote">로봇이 지나간 곳이 지도에 계속 남아요 (흐린 파랑). 저장한 지도는 <b>저장할 때 처음 쌓기 시작한 자리·방향</b>에
+        로봇을 두고 불러오면 맞아요. 지우면 그 순간 자리가 새 출발점이 돼요.</div>
+      <div style="display:flex;gap:6px;padding:8px 16px">
+        <button class="btn" id="m-save">💾 지도 저장</button>
+        <button class="btn" id="m-clear">지우고 새로 쌓기</button>
+      </div>
+      <ul class="files routes" id="dmaplist"></ul>
+    </section>
     <section class="card hidden" id="c-routes">
       <h2>저장한 경로
         <span class="acts rhead"><select id="speed" title="걷는 최고 속도">
@@ -545,6 +560,15 @@ function drawMap(L){
   const [rx, ry] = L.robot;
   view = {rx, ry, s, W, H, yaw: L.yaw || 0};
   const P = (x,y) => [W/2 - (y-ry)*s, H/2 - (x-rx)*s];   // 화면 위쪽 = 월드 +x
+  if(stack.cells && stack.cells.length){                 // 쌓은 지도 (흐리게)
+    const c = stack.cells, r = stack.res, sz = Math.max(2, r*s);
+    cx.fillStyle = 'rgba(76,141,255,.38)';
+    for(let k=0; k<c.length; k+=2){
+      const x = (c[k]+0.5)*r, y = (c[k+1]+0.5)*r;
+      if(Math.abs(x-rx)>RANGE*1.7 || Math.abs(y-ry)>RANGE*2.8) continue;
+      const [u,v] = P(x,y); cx.fillRect(u-sz/2, v-sz/2, sz, sz);
+    }
+  }
   cx.fillStyle = '#4c8dff';
   for(const [x,y] of L.points){
     if(Math.abs(x-rx)>RANGE*1.6 || Math.abs(y-ry)>RANGE*1.6) continue;
@@ -565,10 +589,19 @@ function drawMap(L){
   cx.beginPath(); cx.moveTo(0,-14); cx.lineTo(9,10); cx.lineTo(-9,10); cx.closePath(); cx.fill();
   cx.restore();
 }
+let stack = {version: -1, cells: []};
 async function lidarTick(){
   if(mapVid){ $('lidarinfo').textContent = '로봇 녹화 영상'; return; }   // 데모 영상이 지도를 대신함
   try{
     const L = await api.lidar();
+    if(L.stack){                                          // 쌓은 지도: 바뀌었을 때만 새로 받음
+      renderDmapInfo(L.stack);
+      if(L.stack.version !== stack.version && !stack.loading){
+        stack.loading = true;
+        try{ const c = await (await fetch('/map/cells', {cache:'no-store'})).json(); stack = c; }
+        finally{ stack.loading = false; }
+      }
+    }
     drawMap(L);
     const parts = [];
     if(L.points.length && D && D.connected) parts.push(`${L.points.length}점`);
@@ -621,25 +654,56 @@ function drawNavLayers(P){
   if(n && n.active){                                     // 지금 가는 길
     if(view) drawLine(P, [[view.rx, view.ry], ...n.path], 'rgba(57,217,138,.95)', 3);
     drawDots(P, n.goals, '#39d98a', n.goals.length > 1);
+    if(n.final_yaw !== null && n.final_yaw !== undefined && n.goals.length){
+      const g = n.goals[n.goals.length-1]; drawArrow(P, g[0], g[1], n.final_yaw, '#39d98a');
+    }
+  }
+  if(press && pickMode === 'goto'){                      // 끄는 중: 목표 + 방향 미리보기
+    drawDots(P, [[press.x, press.y]], '#ffffff', false);
+    if(press.yaw !== null) drawArrow(P, press.x, press.y, press.yaw, '#ffffff');
   }
 }
 
-// 지도 클릭 → 월드 좌표
-cv.addEventListener('click', async ev => {
-  if(!pickMode || !view) return;
+// 지도 클릭 → 월드 좌표. 클릭 이동은 누른 채로 끌면 도착 후 바라볼 방향 지정
+let press = null;   // {x, y, u, v, yaw}
+function evWorld(ev){
   const r = cv.getBoundingClientRect();
   const u = (ev.clientX - r.left) * cv.width / r.width, v = (ev.clientY - r.top) * cv.height / r.height;
-  const x = view.rx + (view.H/2 - v) / view.s, y = view.ry + (view.W/2 - u) / view.s;
+  return {u, v, x: view.rx + (view.H/2 - v) / view.s, y: view.ry + (view.W/2 - u) / view.s};
+}
+cv.addEventListener('pointerdown', ev => {
+  if(!pickMode || !view) return;
+  press = {...evWorld(ev), yaw: null};
+  cv.setPointerCapture(ev.pointerId);
+});
+cv.addEventListener('pointermove', ev => {
+  if(!press || pickMode !== 'goto') return;
+  const w = evWorld(ev);
+  press.yaw = Math.hypot(w.u - press.u, w.v - press.v) > 12 ? Math.atan2(w.y - press.y, w.x - press.x) : null;
+  if(lastL) drawMap(lastL);
+});
+cv.addEventListener('pointerup', async ev => {
+  if(!press) return;
+  const p = press; press = null;
   if(pickMode === 'goto'){
-    const j = await api.post('/nav/goto', {x, y, speed: speedVal()});
+    const j = await api.post('/nav/goto', {x: p.x, y: p.y, yaw: p.yaw, speed: speedVal()});
     if(!j.ok) return toast(j.error || '이동을 시작하지 못했어요');
     navSeenResult = null;
-    toast('그곳으로 이동해요 — 멈추려면 ⛔ 정지 (Esc)');
+    toast((p.yaw === null ? '그곳으로 이동해요' : '그곳으로 가서 화살표 방향을 봐요') + ' — 멈추려면 ⛔ 정지 (Esc)');
   } else if(pickMode === 'draft'){
-    draft.pts.push([x, y]); renderDraft();
+    draft.pts.push([p.x, p.y]); renderDraft();
   }
   if(lastL) drawMap(lastL);
 });
+function drawArrow(P, x, y, yaw, color){
+  const [u, v] = P(x, y), L = 34, a = -yaw - Math.PI/2;      // 화면 위 = 월드 +x
+  const ex = u + L*Math.cos(a), ey = v + L*Math.sin(a);
+  cx.save(); cx.strokeStyle = cx.fillStyle = color; cx.lineWidth = 3;
+  cx.beginPath(); cx.moveTo(u, v); cx.lineTo(ex, ey); cx.stroke();
+  cx.beginPath(); cx.moveTo(ex, ey);
+  cx.lineTo(ex - 10*Math.cos(a-0.45), ey - 10*Math.sin(a-0.45)); cx.lineTo(ex - 10*Math.cos(a+0.45), ey - 10*Math.sin(a+0.45));
+  cx.closePath(); cx.fill(); cx.restore();
+}
 cv.addEventListener('wheel', ev => {
   ev.preventDefault();
   RANGE = Math.max(1.5, Math.min(15, RANGE * (ev.deltaY > 0 ? 1.15 : 1/1.15)));
@@ -649,14 +713,37 @@ $('z-in').onclick = () => { RANGE = Math.max(1.5, RANGE/1.3); if(lastL) drawMap(
 $('z-out').onclick = () => { RANGE = Math.min(15, RANGE*1.3); if(lastL) drawMap(lastL); };
 
 function setPick(mode){
+  if(pickMode === 'keys' && mode !== 'keys') keysRelease();
   pickMode = mode;
   $('b-goto').classList.toggle('on', mode === 'goto');
   $('b-draft').classList.toggle('on', mode === 'draft');
-  document.querySelector('.mapwrap').classList.toggle('pick', !!mode);
-  const hint = {goto:'가고 싶은 곳을 클릭하세요 (파란 점 = 장애물)', draft:'지나갈 지점을 차례로 클릭하세요'}[mode];
+  $('b-keys').classList.toggle('on', mode === 'keys');
+  document.querySelector('.mapwrap').classList.toggle('pick', mode === 'goto' || mode === 'draft');
+  const hint = {goto:'가고 싶은 곳을 클릭 · 누른 채 끌면 도착 후 바라볼 방향', draft:'지나갈 지점을 차례로 클릭하세요',
+                keys:'방향키 ↑↓ 앞뒤 · ←→ 회전 · Shift+←→ 옆걸음 · 떼면 멈춤'}[mode];
   $('maphint').classList.toggle('hidden', !hint); if(hint) $('maphint').textContent = hint;
 }
 $('b-goto').onclick = () => { if(draft) return toast('경로 만들기를 먼저 끝내 주세요'); setPick(pickMode === 'goto' ? null : 'goto'); };
+$('b-keys').onclick = () => { if(draft) return toast('경로 만들기를 먼저 끝내 주세요'); setPick(pickMode === 'keys' ? null : 'keys'); $('b-keys').blur(); };
+
+// 방향키 조종: 누르고 있는 동안 0.1초마다 속도 명령 (서버는 0.35초 넘게 안 오면 스스로 멈춤)
+const held = new Set();
+let keysSent = false;
+const ARROWS = ['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'];
+function keysCmd(){
+  const v = speedVal(), side = held.has('Shift');
+  const f = (held.has('ArrowUp') ? 1 : 0) - (held.has('ArrowDown') ? 1 : 0);
+  const l = (held.has('ArrowLeft') ? 1 : 0) - (held.has('ArrowRight') ? 1 : 0);
+  return {vx: f * v * (f < 0 ? 0.7 : 1), vy: side ? l * 0.25 : 0, vyaw: side ? 0 : l * 0.8};
+}
+function keysRelease(){ held.clear(); if(keysSent){ keysSent = false; api.post('/nav/teleop', {vx:0, vy:0, vyaw:0}).catch(()=>{}); } }
+setInterval(() => {
+  if(pickMode !== 'keys') return;
+  if(ARROWS.some(k => held.has(k))){ keysSent = true; api.post('/nav/teleop', keysCmd()).then(j => { if(!j.ok){ toast(j.error); setPick(null); } }).catch(()=>{}); }
+  else if(keysSent) keysRelease();
+}, 100);
+window.addEventListener('blur', keysRelease);
+document.addEventListener('keyup', ev => { held.delete(ev.key); if(ev.key === 'Shift') held.delete('Shift'); });
 $('b-draft').onclick = () => {
   if(draft) return;                                     // 이미 만드는 중
   if(!view) return toast('로봇 위치를 아직 몰라요');
@@ -721,10 +808,52 @@ $('routelist').addEventListener('click', async ev => {
   }
 });
 
+// ── 쌓은 지도: 저장 / 불러오기 / 지우기 ──
+function renderDmapInfo(si){
+  set('dmapinfo', `· ${si.n}칸${si.name ? ' · ' + si.name : ''}`);
+  const b = $('m-toggle'); b.textContent = si.enabled ? '쌓기 켜짐' : '쌓기 꺼짐'; b.classList.toggle('on', si.enabled);
+}
+async function loadDmaps(){
+  let list = [];
+  try{ list = await (await fetch('/map/list', {cache:'no-store'})).json(); }catch(e){}
+  $('dmaplist').innerHTML = list.length ? list.map((m,i) => `
+    <li><span class="nm"><b>${esc(m.name)}</b></span>
+      <span style="margin-left:auto;display:flex;gap:5px;align-items:center">
+        ${m.png ? `<a href="${m.png}" download>그림</a>` : ''}
+        <button class="btn" data-ml="${esc(m.name)}" title="지금 로봇 자리를 이 지도의 출발점으로 불러오기">불러오기</button>
+        <button class="btn" data-md="${esc(m.name)}" title="삭제">🗑</button></span></li>`).join('')
+    : '<li class="empty">저장한 지도가 없어요.</li>';
+}
+$('m-toggle').onclick = async () => { await api.post('/map/toggle'); };
+$('m-clear').onclick = async () => {
+  if(!confirm('쌓은 지도를 지우고 지금 자리부터 새로 쌓을까요?')) return;
+  await api.post('/map/clear'); toast('지도를 지웠어요 — 지금 자리가 새 출발점이에요');
+};
+$('m-save').onclick = async () => {
+  const name = (prompt('지도 이름 (예: 연구실)') || '').trim(); if(!name) return;
+  const j = await api.post('/map/save', {name});
+  if(!j.ok) return toast(j.error || '저장하지 못했어요');
+  toast(`지도 '${name}' 저장 (maps/dashboard)`); loadDmaps();
+};
+$('dmaplist').addEventListener('click', async ev => {
+  const b = ev.target.closest('button'); if(!b) return;
+  if(b.dataset.ml){
+    if(!confirm(`'${b.dataset.ml}' 지도를 불러와요.\n로봇이 이 지도를 처음 쌓기 시작한 자리·방향에 있나요?\n(지금 쌓인 지도는 바뀌어요)`)) return;
+    const j = await api.post('/map/load', {name: b.dataset.ml});
+    toast(j.ok ? '지도를 불러왔어요' : (j.error || '불러오지 못했어요'));
+  } else if(b.dataset.md){
+    if(!confirm(`'${b.dataset.md}' 지도를 지울까요?`)) return;
+    await api.post('/map/delete', {name: b.dataset.md}); loadDmaps();
+  }
+});
+
 async function navStop(){ try{ await api.post('/nav/stop'); }catch(e){} toast('정지했어요'); }
 $('b-stop').onclick = navStop;
 $('b-navok').onclick = () => { navSeenResult = D && D.nav && D.nav.result + D.nav.msg; renderNav(); };
 document.addEventListener('keydown', ev => {
+  if(pickMode === 'keys' && (ARROWS.includes(ev.key) || ev.key === 'Shift') && !/INPUT|TEXTAREA|SELECT/.test(ev.target.tagName)){
+    ev.preventDefault(); held.add(ev.key); return;          // 페이지 스크롤 대신 로봇 조종
+  }
   if((ev.key === 'Escape' || ev.key === ' ') && D && D.nav && D.nav.active && !/INPUT|TEXTAREA|SELECT/.test(ev.target.tagName)){
     ev.preventDefault(); navStop();
   } else if(ev.key === 'Escape'){ if(draft) $('d-cancel').click(); else setPick(null); }
@@ -734,10 +863,11 @@ let wasActive = false;
 function renderNav(){
   if(MODE !== 'live' || !D) return;
   const drive = !!D.can_drive && D.connected;
-  ['b-goto','b-draft'].forEach(id => $(id).classList.toggle('hidden', !D.can_drive));
+  ['b-keys','b-goto','b-draft'].forEach(id => $(id).classList.toggle('hidden', !D.can_drive));
   $('c-routes').classList.toggle('hidden', !D.can_drive);
-  $('b-goto').disabled = $('b-draft').disabled = !drive;
-  if(!drive && pickMode === 'goto') setPick(null);
+  $('c-dmap').classList.toggle('hidden', !D.can_drive);
+  $('b-keys').disabled = $('b-goto').disabled = $('b-draft').disabled = !drive;
+  if(!drive && (pickMode === 'goto' || pickMode === 'keys')) setPick(null);
   const n = D.nav || {};
   const finished = !n.active && n.result && (n.result + n.msg) !== navSeenResult;
   const bar = $('navbar');
@@ -773,7 +903,7 @@ function start(){
   if(!camVid) api.startCamera(showFrame);
   startFpsLabel();
   loadRecordings();
-  if(MODE === 'live') loadRoutes();
+  if(MODE === 'live'){ loadRoutes(); loadDmaps(); }
 }
 
 (async function boot(){

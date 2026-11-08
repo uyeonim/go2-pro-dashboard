@@ -157,8 +157,10 @@ def plan(obstacles, start, goal):
 
 # ───────────────────────── 따라 걷기 ─────────────────────────
 class Navigator:
-    def __init__(self, get_pose, get_obstacles, send_move, send_stop, log=print):
+    def __init__(self, get_pose, get_obstacles, send_move, send_stop, log=print, get_live_obstacles=None):
         self.get_pose, self.get_obstacles = get_pose, get_obstacles
+        # 바로 앞 장애물 검사는 "지금 보이는 점"만 (쌓은 지도의 옛 점·지나간 사람 흔적에 안 멈추게)
+        self.get_live = get_live_obstacles or get_obstacles
         self.send_move, self.send_stop, self.log = send_move, send_stop, log
         self.lock = threading.Lock()
         self.thread = None
@@ -177,15 +179,17 @@ class Navigator:
         self.msg = ""
         self.result = None        # "done" / "stopped" / "failed"
         self.started = 0.0
+        self.final_yaw = None     # 마지막 지점에서 바라볼 방향 (rad, 없으면 None)
 
     def status(self):
         with self.lock:
             return {"active": self.active, "name": self.name, "msg": self.msg, "result": self.result,
                     "goal_i": self.goal_i, "goals_n": len(self.goals), "loop_i": self.loop_i, "loops": self.loops,
                     "goals": [list(g) for g in self.goals], "path": [list(p) for p in self.path],
-                    "speed": self.speed, "elapsed": round(time.time() - self.started, 1) if self.active else None}
+                    "speed": self.speed, "final_yaw": self.final_yaw,
+                    "elapsed": round(time.time() - self.started, 1) if self.active else None}
 
-    def start(self, goals, loops=1, name="", speed=None):
+    def start(self, goals, loops=1, name="", speed=None, final_yaw=None):
         self.stop("새 이동 시작", quiet=True)
         if self.thread:
             self.thread.join(2)
@@ -196,6 +200,7 @@ class Navigator:
             self.name = name
             if speed:
                 self.speed = clip(float(speed), 0.1, MAX_V)
+            self.final_yaw = None if final_yaw is None else float(final_yaw)
             self.active = True
             self.started = time.time()
             self.msg = "길 찾는 중…"
@@ -246,7 +251,7 @@ class Navigator:
         return False
 
     def _front_blocked(self, pose):
-        obs, _ = self.get_obstacles()
+        obs, _ = self.get_live()
         if not len(obs):
             return False
         dx, dy = obs[:, 0] - pose[0], obs[:, 1] - pose[1]
@@ -260,6 +265,31 @@ class Navigator:
             self._drive()
         except Exception as e:  # 어떤 오류든 로봇은 세움
             self._finish("failed", f"오류로 멈춤: {type(e).__name__}: {e}")
+
+    def _turn_to(self, yaw_goal, tol=0.1, timeout=20):
+        """제자리에서 yaw_goal 방향으로 돌기. 성공하면 True."""
+        t0 = time.time()
+        while not self._stop.is_set():
+            p = self.get_pose()
+            if not p or time.time() - p[3] > STALE:
+                self.send_stop()
+                time.sleep(0.2)
+                continue
+            err = wrap(yaw_goal - p[2])
+            if abs(err) < tol:
+                self.send_stop()
+                return True
+            if time.time() - t0 > timeout:
+                self._finish("failed", "방향 맞추기에 실패했어요")
+                return False
+            with self.lock:
+                self.msg = f"방향 맞추는 중 · {math.degrees(err):+.0f}°"
+            w = clip(1.8 * err, -MAX_W, MAX_W)
+            if abs(w) < 0.25:                    # 너무 느리면 로봇이 안 돌아서 최소 속도
+                w = math.copysign(0.25, err)
+            self.send_move(0.0, w)
+            time.sleep(0.1)
+        return False
 
     def _drive(self):
         for loop_i in range(self.loops):
@@ -330,6 +360,8 @@ class Navigator:
                     return
                 self.send_stop()
                 time.sleep(0.4)
+        if self.final_yaw is not None and not self._turn_to(self.final_yaw):
+            return
         n = len(self.goals)
         self._finish("done", f"도착했어요 ({n}개 지점" + (f", {self.loops}바퀴" if self.loops > 1 else "")
                      + f", {time.time() - self.started:.0f}초)")

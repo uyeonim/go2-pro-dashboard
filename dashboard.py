@@ -27,6 +27,7 @@ import cv2
 import numpy as np
 from flask import Flask, Response, jsonify, redirect, request, send_from_directory, session
 
+from mapstack import MapStack
 from navigator import Navigator
 from sensors import make_conn  # import 시 .env도 읽음
 from unitree_webrtc_connect import RTC_TOPIC, SPORT_CMD
@@ -41,6 +42,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 REC_DIR = os.path.join(BASE, "recordings")   # 녹화(영상 + 센서 CSV)
 CAP_DIR = os.path.join(BASE, "captures")     # 사진
 ROUTE_DIR = os.path.join(BASE, "routes")     # 저장한 경로 (route_drive.py와 같은 형식)
+DMAP_DIR = os.path.join(BASE, "maps", "dashboard")   # 대시보드에서 쌓은 지도
 FRAME_W, JPEG_Q = 960, 75                    # 전송용 영상 크기/화질 (공개 주소에서도 가볍게)
 TRAIL_MAX = 3000                             # 경로 점 최대 개수
 LEGS = ["FR", "FL", "RR", "RL"]              # Go2 모터 순서: 다리별 (hip, thigh, calf)
@@ -73,6 +75,7 @@ ERROR_HINTS = {
     "TimeoutError": "연결이 끝까지 안 돼요. PC와 로봇이 같은 Wi-Fi인지 확인하세요.",
 }
 
+mapst = MapStack()   # 지나간 곳의 LiDAR 점을 계속 쌓는 지도
 _frame_lock = threading.Lock()
 _latest_jpeg = [None]
 _latest_t = [0.0]  # 마지막 프레임 받은 시각
@@ -216,6 +219,8 @@ def update_lidar(pts):
         state["obstacle_lidar"] = lidar_obstacles(band[:, :2], s["position"][0], s["position"][1],
                                                   s["imu_state"]["rpy"][2])
     obs = band[:, :2]
+    if s is not None:
+        mapst.add(obs, (s["position"][0], s["position"][1], s["imu_state"]["rpy"][2]))
     if len(obs) > 30000:
         obs = obs[np.random.choice(len(obs), 30000, replace=False)]
     state["obs"] = obs.astype(np.float32)
@@ -330,7 +335,8 @@ def _demo_room():
     return np.array(pts)
 
 
-sim = {"manual": False, "cmd": (0.0, 0.0), "cmd_t": 0.0, "x": 0.0, "y": 0.0, "yaw": 0.0, "vx": 0.0, "vyaw": 0.0}
+sim = {"manual": False, "cmd": (0.0, 0.0, 0.0), "cmd_t": 0.0, "x": 0.0, "y": 0.0, "yaw": 0.0,
+       "vx": 0.0, "vy": 0.0, "vyaw": 0.0}
 
 
 def demo_thread():
@@ -352,15 +358,17 @@ def demo_thread():
             yaw = math.atan2(vy, vx)
             sim.update(x=x, y=y, yaw=yaw)
         else:                                           # 이동 명령을 받은 뒤: 명령대로 걷는 가짜 로봇
-            cvx, cvyaw = sim["cmd"] if time.time() - sim["cmd_t"] < 0.5 else (0.0, 0.0)
+            cvx, cvy, cvyaw = sim["cmd"] if time.time() - sim["cmd_t"] < 0.5 else (0.0, 0.0, 0.0)
             a = min(1.0, dt / 0.3)                      # 실제 로봇처럼 0.3초쯤 늦게 반응
             sim["vx"] += (cvx - sim["vx"]) * a
+            sim["vy"] += (cvy - sim["vy"]) * a
             sim["vyaw"] += (cvyaw - sim["vyaw"]) * a
             sim["yaw"] = (sim["yaw"] + sim["vyaw"] * dt + math.pi) % (2 * math.pi) - math.pi
-            sim["x"] += sim["vx"] * math.cos(sim["yaw"]) * dt
-            sim["y"] += sim["vx"] * math.sin(sim["yaw"]) * dt
+            c, s_ = math.cos(sim["yaw"]), math.sin(sim["yaw"])
+            sim["x"] += (sim["vx"] * c - sim["vy"] * s_) * dt
+            sim["y"] += (sim["vx"] * s_ + sim["vy"] * c) * dt
             x, y, yaw = sim["x"], sim["y"], sim["yaw"]
-            vx, vy, w = sim["vx"] * math.cos(yaw), sim["vx"] * math.sin(yaw), sim["vyaw"]
+            vx, vy, w = sim["vx"] * c - sim["vy"] * s_, sim["vx"] * s_ + sim["vy"] * c, sim["vyaw"]
         update_sport({
             "position": [x, y, 0.30], "body_height": 0.32,
             "velocity": [vx, vy, 0.0], "yaw_speed": w,
@@ -485,9 +493,9 @@ def _sport_cmd(api, param=None):
     """로봇에 스포츠 명령 보내기 (응답은 기다리지 않음). 데모에서는 가짜 로봇으로."""
     if state["demo"]:
         if api == "Move":
-            sim.update(manual=True, cmd=(param["x"], param["z"]), cmd_t=time.time())
+            sim.update(manual=True, cmd=(param["x"], param.get("y", 0), param["z"]), cmd_t=time.time())
         else:
-            sim.update(cmd=(0.0, 0.0), cmd_t=time.time())
+            sim.update(cmd=(0.0, 0.0, 0.0), cmd_t=time.time())
         return
     conn, loop = state["conn"], state["loop"]
     if conn is None or loop is None:
@@ -504,9 +512,17 @@ def _sport_cmd(api, param=None):
     asyncio.run_coroutine_threadsafe(send(), loop)
 
 
+def _all_obstacles():
+    """길 찾기용: 지금 보이는 점 + 쌓은 지도"""
+    stack = mapst.occupied_xy()
+    obs = np.vstack([state["obs"], stack]) if len(stack) else state["obs"]
+    return obs, state["lidar_t"]
+
+
 nav = Navigator(
     get_pose=_pose,
-    get_obstacles=lambda: (state["obs"], state["lidar_t"]),
+    get_obstacles=_all_obstacles,
+    get_live_obstacles=lambda: (state["obs"], state["lidar_t"]),
     send_move=lambda vx, vyaw: _sport_cmd("Move", {"x": round(vx, 3), "y": 0, "z": round(vyaw, 3)}),
     send_stop=lambda: _sport_cmd("StopMove"),
     log=log,
@@ -559,9 +575,42 @@ def nav_goto():
     if bad:
         return bad
     j = request.get_json(force=True)
-    nav.start([(float(j["x"]), float(j["y"]))], name="클릭 이동", speed=j.get("speed"))
-    log(f"🎯 클릭 이동: ({j['x']:.2f}, {j['y']:.2f})")
+    yaw = j.get("yaw")
+    nav.start([(float(j["x"]), float(j["y"]))], name="클릭 이동", speed=j.get("speed"), final_yaw=yaw)
+    log(f"🎯 클릭 이동: ({j['x']:.2f}, {j['y']:.2f})" + (f" 방향 {math.degrees(yaw):.0f}°" if yaw is not None else ""))
     return jsonify({"ok": True})
+
+
+# 방향키 조종: 브라우저가 키를 누르는 동안 0.1초마다 보냄. 0.35초 넘게 안 오면 자동 정지.
+teleop = {"t": 0.0, "active": False}
+
+
+@app.route("/nav/teleop", methods=["POST"])
+def nav_teleop():
+    bad = _drive_guard()
+    if bad:
+        return bad
+    j = request.get_json(force=True)
+    vx = max(-0.5, min(0.6, float(j.get("vx", 0))))
+    vy = max(-0.4, min(0.4, float(j.get("vy", 0))))
+    vyaw = max(-1.0, min(1.0, float(j.get("vyaw", 0))))
+    if nav.active:
+        nav.stop("방향키 조종", quiet=True)
+    if vx == vy == vyaw == 0:
+        teleop["active"] = False
+        _sport_cmd("StopMove")
+    else:
+        teleop.update(t=time.time(), active=True)
+        _sport_cmd("Move", {"x": round(vx, 3), "y": round(vy, 3), "z": round(vyaw, 3)})
+    return jsonify({"ok": True})
+
+
+def teleop_watchdog():
+    while True:
+        time.sleep(0.1)
+        if teleop["active"] and time.time() - teleop["t"] > 0.35:   # 키 신호가 끊김(창 닫힘/네트워크) → 정지
+            teleop["active"] = False
+            _sport_cmd("StopMove")
 
 
 @app.route("/nav/run", methods=["POST"])
@@ -622,6 +671,63 @@ def routes_save():
                    "created": time.strftime("%Y-%m-%dT%H:%M:%S"), "points": pts}, f, ensure_ascii=False, indent=1)
     log(f"💾 경로 저장: routes/{j['name']}.json ({len(pts)}개 지점)")
     return jsonify({"ok": True})
+
+
+@app.route("/map/cells")
+def map_cells():
+    return jsonify(mapst.cells())
+
+
+def _dmap_path(name):
+    if not re.fullmatch(r"[\w\-가-힣]{1,40}", name or ""):
+        return None
+    return os.path.join(DMAP_DIR, name)
+
+
+@app.route("/map/list")
+def map_list():
+    out = []
+    if os.path.isdir(DMAP_DIR):
+        for fn in sorted(os.listdir(DMAP_DIR)):
+            if fn.endswith(".json"):
+                n = fn[:-5]
+                out.append({"name": n, "png": f"/files/dmaps/{n}.png" if os.path.exists(os.path.join(DMAP_DIR, n + ".png")) else None})
+    return jsonify(out)
+
+
+@app.route("/map/<action>", methods=["POST"])
+def map_action(action):
+    if not can_drive():
+        return jsonify({"ok": False, "error": "노트북 화면에서만 할 수 있어요"}), 403
+    j = request.get_json(silent=True) or {}
+    if action == "clear":
+        mapst.clear(home=_pose()[:3] if _pose() else None)
+        return jsonify({"ok": True})
+    if action == "toggle":
+        mapst.enabled = not mapst.enabled
+        return jsonify({"ok": True, "enabled": mapst.enabled})
+    p = _dmap_path(j.get("name"))
+    if not p:
+        return jsonify({"ok": False, "error": "이름은 한글·영어·숫자·_·- 로 40자까지"}), 400
+    if action == "save":
+        ok, msg = mapst.save(p, j["name"])
+        if ok:
+            log(f"💾 지도 저장: maps/dashboard/{j['name']} ({msg})")
+        return jsonify({"ok": ok, "error": None if ok else msg})
+    if action == "load":
+        if not os.path.exists(p + ".json"):
+            return jsonify({"ok": False, "error": "지도를 찾을 수 없어요"}), 404
+        if _pose() is None:
+            return jsonify({"ok": False, "error": "로봇 위치를 아직 몰라요"}), 409
+        n = mapst.load(p, _pose()[:3])
+        log(f"📂 지도 불러옴: {j['name']} ({n}칸, 지금 자리를 출발점으로)")
+        return jsonify({"ok": True})
+    if action == "delete":
+        for ext in (".json", ".png"):
+            if os.path.exists(p + ext):
+                os.remove(p + ext)
+        return jsonify({"ok": True})
+    return jsonify({"ok": False, "error": "unknown"}), 404
 
 
 @app.route("/routes/delete", methods=["POST"])
@@ -716,7 +822,7 @@ def recordings():
 
 @app.route("/files/<kind>/<path:sub>")
 def files(kind, sub):
-    root = {"recordings": REC_DIR, "captures": CAP_DIR}.get(kind)
+    root = {"recordings": REC_DIR, "captures": CAP_DIR, "dmaps": DMAP_DIR}.get(kind)
     if root is None:
         return "not found", 404
     return send_from_directory(root, sub, as_attachment=True)  # send_from_directory가 폴더 밖 경로를 막아 줌
@@ -770,6 +876,7 @@ def lidar():
         "yaw": s["imu_state"]["rpy"][2] if s else None,
         "trail": tr[::step] + (tr[-1:] if tr and (len(tr) - 1) % step else []),
         "trail_len": round(sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(tr, tr[1:])), 2),
+        "stack": mapst.info(),
     })
 
 
@@ -787,6 +894,7 @@ if __name__ == "__main__":
 
     threading.Thread(target=demo_thread if args.demo else robot_thread,
                      args=() if args.demo else (args,), daemon=True).start()
+    threading.Thread(target=teleop_watchdog, daemon=True).start()
 
     # Windows에서 'localhost'는 IPv6(::1)를 먼저 시도해서 요청마다 ~2초 지연됨
     # → IPv6에서도 바로 응답하도록 ::1 서버를 하나 더 띄움
