@@ -47,6 +47,10 @@ apply_safe_speed() {
   sed -i -E 's/^(\s*transform_tolerance:).*/\1 1.0/' "$f"
   sed -i -E '/^controller_server:/,/ros__parameters:/ s/(ros__parameters:.*)/\1\n    costmap_update_timeout: 3.0/' "$f"
   sed -i -E '/^\s+(local|global)_costmap:\s*$/,/ros__parameters:/ s/^(\s*)ros__parameters:.*/&\n\1  transform_tolerance: 1.0/' "$f"
+  # "한 번만 되고 다음부터 실패" 해결: 라이다가 로봇 자기 몸(0.5m 안)을 장애물로 지도에 찍어서
+  # 출발점이 "벽 속"이 됨 → 경로 계획 즉시 실패. 0.5m 안의 점은 장애물로 안 침
+  sed -i -E -e 's/^(\s*obstacle_min_range:).*/\1 0.5/' -e 's/^(\s*raytrace_min_range:).*/\1 0.0/' \
+            -e 's/^(\s*inflation_radius:).*/\1 0.55/' "$f"
   # 느림 해결: 제어 주기 3Hz → 10Hz (3Hz면 로봇이 멈칫멈칫), sim_time 끄기
   sed -i -E -e 's/^(\s*controller_frequency:).*/\1 10.0/' -e 's/^(\s*use_sim_time:).*/\1 False/' "$f"
   # 위치 추정(AMCL): 라이다로 더 자주 고치게
