@@ -173,7 +173,7 @@ def set_frame(img_bgr):
 def update_sport(d):
     state["sport"] = d
     state["sport_t"] = time.time()
-    x, y = d["position"][0], d["position"][1]
+    x, y, _ = mapst.correct((d["position"][0], d["position"][1], d["imu_state"]["rpy"][2]))  # 지도 좌표
     tr = state["trail"]
     if not tr or math.hypot(x - tr[-1][0], y - tr[-1][1]) > 0.03:  # 3cm 이상 움직이면 기록
         tr.append([round(x, 3), round(y, 3)])
@@ -215,18 +215,21 @@ def update_lidar(pts):
     s = state["sport"]
     z0 = s["position"][2] if s else 0.0
     band = pts[(pts[:, 2] > z0 - 0.15) & (pts[:, 2] < z0 + 0.6)]  # 몸 높이 근처(바닥/천장 제외)
-    if s is not None and len(band):
-        state["obstacle_lidar"] = lidar_obstacles(band[:, :2], s["position"][0], s["position"][1],
-                                                  s["imu_state"]["rpy"][2])
-    obs = band[:, :2]
-    if s is not None:
-        mapst.add(obs, (s["position"][0], s["position"][1], s["imu_state"]["rpy"][2]))
+    if not len(band):
+        return
+    raw = (s["position"][0], s["position"][1], s["imu_state"]["rpy"][2]) if s is not None else None
+    # 스캔 정합으로 odom 오차를 보정한 "지도 좌표" 점 (+ 확률 지도 갱신)
+    xy = mapst.process(band[:, :2], raw) if raw else mapst.correct_pts(band[:, :2].astype(np.float32))
+    pose = mapst.correct(raw)
+    if pose is not None:
+        state["obstacle_lidar"] = lidar_obstacles(xy, pose[0], pose[1], pose[2])
+    obs = xy
     if len(obs) > 30000:
         obs = obs[np.random.choice(len(obs), 30000, replace=False)]
     state["obs"] = obs.astype(np.float32)
-    if len(band) > 4000:
-        band = band[np.random.choice(len(band), 4000, replace=False)]
-    state["lidar"] = np.round(band[:, :2], 2).tolist()
+    if len(xy) > 4000:
+        xy = xy[np.random.choice(len(xy), 4000, replace=False)]
+    state["lidar"] = np.round(xy, 2).tolist()
     state["lidar_t"] = time.time()
 
 
@@ -335,6 +338,7 @@ def _demo_room():
     return np.array(pts)
 
 
+DEMO_DRIFT = False   # --drift
 sim = {"manual": False, "cmd": (0.0, 0.0, 0.0), "cmd_t": 0.0, "x": 0.0, "y": 0.0, "yaw": 0.0,
        "vx": 0.0, "vy": 0.0, "vyaw": 0.0}
 
@@ -369,10 +373,14 @@ def demo_thread():
             sim["y"] += (sim["vx"] * s_ + sim["vy"] * c) * dt
             x, y, yaw = sim["x"], sim["y"], sim["yaw"]
             vx, vy, w = sim["vx"] * c - sim["vy"] * s_, sim["vx"] * s_ + sim["vy"] * c, sim["vyaw"]
+        # --drift: 실제 로봇처럼 odom이 조금씩 틀어지게 (위치·LiDAR 둘 다 같은 오차) → 스캔 정합 시험용
+        dth, dtx, dty = (0.0015 * t, 0.003 * t, -0.002 * t) if DEMO_DRIFT else (0.0, 0.0, 0.0)
+        cd, sd = math.cos(dth), math.sin(dth)
+        ox, oy = cd * x - sd * y + dtx, sd * x + cd * y + dty
         update_sport({
-            "position": [x, y, 0.30], "body_height": 0.32,
+            "position": [ox, oy, 0.30], "body_height": 0.32,
             "velocity": [vx, vy, 0.0], "yaw_speed": w,
-            "imu_state": {"rpy": [0.01 * math.sin(t * 3), 0.02 * math.sin(t * 2), yaw]},
+            "imu_state": {"rpy": [0.01 * math.sin(t * 3), 0.02 * math.sin(t * 2), yaw + dth]},
             "foot_force": [0, 0, 0, 0], "range_obstacle": [0, 0, 0, 0],  # Pro처럼 안 들어오는 값
             "mode": 0, "gait_type": 0,
         })
@@ -398,7 +406,15 @@ def demo_thread():
             set_frame(img)
         if t - last_lidar > 0.5:
             last_lidar = t
-            update_lidar(room + np.random.normal(0, 0.01, room.shape))
+            pts = room + np.random.normal(0, 0.01, room.shape)
+            if DEMO_DRIFT:   # 잡음 시험: 걸어다니는 사람 + 아무 데나 튀는 점
+                px_, py_ = -2.0 + 4.0 * ((t / 20) % 1), -1.8
+                ang = np.random.uniform(0, 2 * np.pi, 120)
+                person = np.stack([px_ + 0.2 * np.cos(ang), py_ + 0.2 * np.sin(ang), np.full(120, 0.5)], 1)
+                specks = np.stack([np.random.uniform(-3, 3, 25), np.random.uniform(-2.5, 2.5, 25), np.full(25, 0.4)], 1)
+                pts = np.vstack([pts, person, specks])
+            pts[:, :2] = pts[:, :2] @ np.array([[cd, sd], [-sd, cd]]) + [dtx, dty]   # odom 좌표로 (드리프트)
+            update_lidar(pts)
         time.sleep(0.02)
 
 
@@ -483,10 +499,11 @@ recorder = Recorder()
 
 # ───────────────────────── 자율 이동 (지도 클릭 / 경로) ─────────────────────────
 def _pose():
+    """지도 좌표 로봇 자세 (스캔 정합 보정 반영) + 받은 시각"""
     s = state["sport"]
     if s is None:
         return None
-    return s["position"][0], s["position"][1], s["imu_state"]["rpy"][2], state["sport_t"]
+    return (*mapst.correct((s["position"][0], s["position"][1], s["imu_state"]["rpy"][2])), state["sport_t"])
 
 
 def _sport_cmd(api, param=None):
@@ -866,14 +883,14 @@ def data():
 
 @app.route("/lidar")
 def lidar():
-    s = state["sport"]
+    p = _pose()                     # 지도 좌표 (스캔 정합 보정)
     tr = state["trail"]
     step = max(1, len(tr) // 1000)  # 화면용으로 최대 ~1000점
     return jsonify({
         "points": state["lidar"],
         "age": round(time.time() - state["lidar_t"], 1) if state["lidar_t"] else None,
-        "robot": s["position"][:2] if s else None,
-        "yaw": s["imu_state"]["rpy"][2] if s else None,
+        "robot": [p[0], p[1]] if p else None,
+        "yaw": p[2] if p else None,
         "trail": tr[::step] + (tr[-1:] if tr and (len(tr) - 1) % step else []),
         "trail_len": round(sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(tr, tr[1:])), 2),
         "stack": mapst.info(),
@@ -886,9 +903,11 @@ if __name__ == "__main__":
     p.add_argument("--ap", action="store_true")
     p.add_argument("--key", default=DEFAULT_KEY)
     p.add_argument("--demo", action="store_true", help="로봇 없이 가짜 데이터로 실행")
+    p.add_argument("--drift", action="store_true", help="데모에서 odom 오차·잡음을 일부러 넣음 (지도 보정 시험)")
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--no-browser", action="store_true")
     args = p.parse_args()
+    DEMO_DRIFT = args.drift
     if not args.demo and not args.ap and not args.ip:
         p.error(".env에 UNITREE_ROBOT_IP를 적거나 --ip 192.168.x.x 를 지정하세요 (로봇 없이 보려면 --demo)")
 
