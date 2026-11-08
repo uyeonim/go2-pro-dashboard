@@ -49,12 +49,11 @@ apply_safe_speed() {
   sed -i -E '/^\s+(local|global)_costmap:\s*$/,/ros__parameters:/ s/^(\s*)ros__parameters:.*/&\n\1  transform_tolerance: 1.0/' "$f"
   # 느림 해결: 제어 주기 3Hz → 10Hz (3Hz면 로봇이 멈칫멈칫), sim_time 끄기
   sed -i -E -e 's/^(\s*controller_frequency:).*/\1 10.0/' -e 's/^(\s*use_sim_time:).*/\1 False/' "$f"
-  # 위치 추정(AMCL): 찍어준 위치를 덜 믿고 라이다로 더 자주 고치게
+  # 위치 추정(AMCL): 라이다로 더 자주 고치게
+  # (recovery_alpha로 "스스로 다시 찾기"를 켰더니 지도 가운데 잡동사니에 맞춰 엉뚱한 곳으로 튐 → 끔)
   sed -i -E \
     -e 's/^(\s*update_min_d:).*/\1 0.1/' \
     -e 's/^(\s*update_min_a:).*/\1 0.1/' \
-    -e 's/^(\s*recovery_alpha_slow:).*/\1 0.001/' \
-    -e 's/^(\s*recovery_alpha_fast:).*/\1 0.1/' \
     -e 's/^(\s*laser_likelihood_max_dist:).*/\1 2.0/' \
     "$f"
   # Jazzy bt_navigator는 기본 BT 플러그인을 자동으로 불러옴 → 목록이 있으면 "already registered"로 죽음
