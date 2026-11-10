@@ -188,6 +188,41 @@ def update_low(d):
     state["low_t"] = time.time()
 
 
+PROBE_TOPICS = [
+    "rt/uslam/frontend/odom", "rt/uslam/frontend/cloud_world_ds", "rt/uslam/cloud_map", "rt/uslam/server_log",
+    "rt/uslam/localization/odom", "rt/uslam/localization/cloud_world", "rt/uslam/navigation/global_path",
+    "rt/utlidar/robot_pose", "rt/mapping/grid_map", "rt/lio_sam_ros2/mapping/odometry",
+    "rt/qt_notice", "rt/pctoimage_local", "rt/utlidar/lidar_state",
+]
+probe = {}
+
+
+def _shape(v, depth=0):
+    """메시지 구조 요약 (값이 크면 길이만)"""
+    if isinstance(v, dict):
+        return {k: _shape(x, depth + 1) for k, x in list(v.items())[:25]} if depth < 4 else "{...}"
+    if isinstance(v, (list, tuple)):
+        return f"list[{len(v)}]" + (f" e.g. {_shape(v[0], depth + 1)}" if v and depth < 4 else "")
+    if isinstance(v, (bytes, bytearray)):
+        return f"bytes[{len(v)}]"
+    if hasattr(v, "shape"):
+        return f"array{tuple(v.shape)}"
+    if isinstance(v, str):
+        return v[:120]
+    return v
+
+
+def probe_msg(tp, m):
+    p = probe.setdefault(tp, {"n": 0, "first": time.time()})
+    p["n"] += 1
+    p["last"] = time.time()
+    if p["n"] <= 3 or p["n"] % 20 == 0:
+        try:
+            p["sample"] = _shape(m.get("data") if isinstance(m, dict) else m)
+        except Exception as e:
+            p["sample"] = f"(요약 실패 {e})"
+
+
 def update_uwb(d):
     """따라가기 리모컨(UWB 태그) 상태: 로봇 기준 리모컨 거리·방향 등"""
     state["uwb"] = d
@@ -286,6 +321,8 @@ def robot_thread(args):
                 sub(RTC_TOPIC["LF_SPORT_MOD_STATE"], lambda m: update_sport(m["data"]))
                 sub(RTC_TOPIC["LOW_STATE"], lambda m: update_low(m["data"]))
                 sub(RTC_TOPIC["UWB_STATE"], lambda m: update_uwb(m["data"]))   # 따라가기 리모컨(UWB 태그)
+                for tp in PROBE_TOPICS:   # 로봇 내장 SLAM 등: 어떤 데이터가 오는지 확인만 (읽기 전용)
+                    sub(tp, lambda m, tp=tp: probe_msg(tp, m))
                 conn.video.switchVideoChannel(True)
                 conn.video.add_track_callback(on_track)
                 try:  # LiDAR 켜기 + 구독 (실패해도 영상/센서는 계속)
@@ -939,6 +976,14 @@ def files(kind, sub):
     if root is None:
         return "not found", 404
     return send_from_directory(root, sub, as_attachment=True)  # send_from_directory가 폴더 밖 경로를 막아 줌
+
+
+@app.route("/probe")
+def probe_view():
+    now = time.time()
+    return jsonify({tp: {"n": p["n"], "hz": round(p["n"] / max(1e-3, p["last"] - p["first"]), 1) if p["n"] > 1 else None,
+                         "age": round(now - p["last"], 1), "sample": p.get("sample")}
+                    for tp, p in probe.items()} | {"_not_received": [t for t in PROBE_TOPICS if t not in probe]})
 
 
 @app.route("/uwb")
