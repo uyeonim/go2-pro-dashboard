@@ -423,8 +423,8 @@ def demo_thread():
             if np.random.rand() < 0.05:                 # 실제처럼 가끔 앞뒤가 뒤집혀 튀는 값
                 bearing += math.pi
             update_uwb({"distance_est": math.hypot(hx - x, hy - y) + np.random.normal(0, 0.05),
-                        "tag_yaw": (bearing + math.pi) % (2 * math.pi) - math.pi,
-                        "yaw_est": bearing + yaw, "base_yaw": yaw, "buttons": 0, "joystick": [0, 0]})
+                        "orientation_est": (bearing + math.pi) % (2 * math.pi) - math.pi,   # 로봇 기준 리모컨 방향
+                        "tag_yaw": np.random.uniform(-3, 3), "base_yaw": yaw, "buttons": 0, "joystick": [0, 0]})
         if t - last_lidar > 0.5:
             last_lidar = t
             pts = room + np.random.normal(0, 0.01, room.shape)

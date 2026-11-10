@@ -1,10 +1,12 @@
 """1번 기능: 리모컨(UWB 태그) 든 사람 따라가기 + 로봇을 바라보면 하트/인사.
 
-UWB (rt/uwbstate) 실측으로 확인한 값 (2026-11-10):
-  distance_est : 로봇 → 리모컨 거리 (m)
-  tag_yaw      : 로봇 정면 기준 리모컨 방향 (rad, 0 = 정면, ±π = 뒤)  ≈ yaw_est − base_yaw
-  buttons      : 리모컨 버튼 비트 (1, 2, 4, 8),  joystick: [x, y] (−1~1)
-방향 값은 가끔 앞/뒤가 뒤집혀 튀므로 걸러서 씀. 왼쪽이 +인지 −인지는 회전해 보며 스스로 확인(자동 보정).
+UWB (rt/uwbstate) 실측으로 확인한 값 (2026-11-10, 로봇 주위를 반시계로 한 바퀴 돌며 기록):
+  distance_est    : 로봇 → 리모컨 거리 (m)
+  orientation_est : 로봇 정면 기준 리모컨이 있는 방향 (rad, 0 = 정면, 왼쪽 +, 반시계로 돌면 증가)
+  pitch_est       : 올려다보는 각도 (리모컨이 로봇보다 높음)
+  tag_roll/pitch/yaw : 리모컨 자체의 기울기·방향 (손에 든 각도) — 위치가 아님! (처음에 이걸 써서 빙빙 돌았음)
+  buttons         : 리모컨 버튼 비트 (1, 2, 4, 8),  joystick: [x, y] (−1~1)
+방향 값은 가끔 크게 튀므로(몸에 가려질 때 등) 걸러서 씀.
 
 바라보기 판단: 카메라 영상에서 얼굴(YuNet)을 찾고, 코가 두 눈 가운데에 있으면 정면(로봇을 보는 중).
 그 얼굴이 리모컨 방향과 맞는 사람일 때만 → 1초 넘게 보면 하트(FingerHeart) / 인사(Hello) 번갈아.
@@ -51,7 +53,7 @@ class UwbFilter:
 
     def update(self, d):
         try:
-            dist, b = float(d["distance_est"]), float(d["tag_yaw"])
+            dist, b = float(d["distance_est"]), float(d["orientation_est"])
         except (KeyError, TypeError, ValueError):
             return
         if not (0.05 < dist < 30):
@@ -63,12 +65,12 @@ class UwbFilter:
             return
         e = wrap(b - self.bearing)
         if abs(e) < math.radians(60):
-            self.bearing = wrap(self.bearing + 0.35 * e)
+            self.bearing = wrap(self.bearing + 0.25 * e)
             self.out, self.out_vals = 0, []
-        else:                                    # 크게 튄 값: 계속 그쪽이면(0.5초) 진짜로 이동한 것
+        else:                                    # 크게 튄 값: 계속 그쪽이면(약 0.9초) 진짜로 이동한 것
             self.out += 1
             self.out_vals.append(b)
-            if self.out >= 5 and abs(wrap(self.out_vals[-1] - self.out_vals[0])) < math.radians(45):
+            if self.out >= 8 and abs(wrap(self.out_vals[-1] - self.out_vals[0])) < math.radians(45):
                 self.bearing, self.out, self.out_vals = b, 0, []
 
     def get(self):
@@ -130,7 +132,7 @@ class Follower:
         self.dist_goal = 1.3
         self.speed = 0.5
         self.heart = True
-        self.sign = 1.0           # 방향 부호 (자동 보정)
+        self.sign = 1.0           # 방향 부호 (실측: 왼쪽 + 로 확인됨)
         self.msg = ""
         self.look_since = None
         self.last_action = 0.0
@@ -138,7 +140,6 @@ class Follower:
         self.actions = 0
         self.face_seen = None     # 마지막 얼굴 상태 (화면 표시)
         self._stop = threading.Event()
-        self._calib = [0.0, 0.0]  # (Σ Δ방향·Δ로봇회전, Σ|Δ로봇회전|)
         threading.Thread(target=self._face_loop, daemon=True).start()
 
     # ── 외부에서 ──
@@ -195,7 +196,6 @@ class Follower:
 
     # ── 따라가기 ──
     def _run(self):
-        prev = None                       # (방향, 로봇 yaw) — 부호 자동 보정용
         try:
             while not self._stop.is_set():
                 time.sleep(0.1)
@@ -208,23 +208,8 @@ class Follower:
                     self.send_stop()
                     with self.lock:
                         self.msg = "리모컨 신호가 없어요 — 리모컨을 켜고 로봇 근처에서 들어 주세요"
-                    prev = None
                     continue
                 dist, b, _ = r
-                # 부호 자동 보정: 제자리 회전할 때 리모컨 방향은 로봇이 돈 만큼 반대로 바뀌어야 함
-                if p is not None and prev is not None:
-                    dyaw = wrap(p[2] - prev[1])
-                    db = wrap(b - prev[0])
-                    if abs(dyaw) > 0.01:
-                        self._calib[0] += db * dyaw
-                        self._calib[1] += abs(dyaw)
-                        if self._calib[1] > 1.2:     # 약 70° 돈 뒤 판단
-                            if self._calib[0] > 0:   # 같이 늘면 부호가 반대
-                                self.sign = -self.sign
-                                self.log("↔ 리모컨 방향 부호를 반대로 보정했어요")
-                            self._calib = [0.0, 0.0]
-                prev = (b, p[2]) if p is not None else None
-
                 err = dist - self.dist_goal
                 vyaw = clip(1.3 * b, -MAX_W, MAX_W)
                 if abs(b) > TURN_FIRST:
