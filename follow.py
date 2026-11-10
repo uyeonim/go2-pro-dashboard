@@ -20,12 +20,14 @@ from collections import deque
 import cv2
 import numpy as np
 
+from navigator import plan
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 YUNET = os.path.join(HERE, "models", "face_detection_yunet_2023mar.onnx")
 
-MAX_V, MAX_W = 0.6, 0.9
+MAX_V, MAX_W = 1.2, 1.5  # 걷는 사람(~1.2m/s) 따라잡을 수 있게
 STALE = 0.6              # 리모컨 값이 이보다 오래되면 정지
-TURN_FIRST = 0.4         # 방향이 이보다 틀어지면 제자리에서 먼저 돌기 (rad, 약 23°)
+TURN_FIRST = 0.6         # 방향이 이보다 틀어지면 제자리에서 먼저 돌기 (rad, 약 34°)
 FRONT_STOP = 0.5         # 바로 앞 장애물 거리 (m)
 CAM_HFOV = math.radians(100)   # 카메라 가로 화각 (대략)
 LOOK_HOLD = 1.0          # 이만큼(초) 바라보면 동작
@@ -121,8 +123,11 @@ class FaceWatch:
 
 
 class Follower:
-    def __init__(self, get_pose, get_live_obstacles, get_jpeg, send_move, send_stop, send_action, log=print):
+    def __init__(self, get_pose, get_live_obstacles, get_jpeg, send_move, send_stop, send_action, log=print,
+                 get_obstacles=None):
         self.get_pose, self.get_live = get_pose, get_live_obstacles
+        self.get_obstacles = get_obstacles or get_live_obstacles   # 길 찾기용 (지금 보이는 점 + 쌓은 지도)
+        self._plan, self._plan_t = None, 0.0
         self.get_jpeg = get_jpeg
         self.send_move, self.send_stop, self.send_action, self.log = send_move, send_stop, send_action, log
         self.filter = UwbFilter()
@@ -130,7 +135,7 @@ class Follower:
         self.lock = threading.Lock()
         self.active = False
         self.dist_goal = 1.3
-        self.speed = 0.5
+        self.speed = 0.8
         self.heart = True
         self.sign = 1.0           # 방향 부호 (실측: 왼쪽 + 로 확인됨)
         self.msg = ""
@@ -158,6 +163,7 @@ class Follower:
         fresh = r is not None and time.time() - r[2] < STALE
         with self.lock:
             return {"active": self.active, "msg": self.msg, "dist_goal": self.dist_goal, "heart": self.heart,
+                    "speed": self.speed, "plan": [list(q) for q in self._plan] if self._plan else None,
                     "remote": [round(r[0], 2), round(r[1], 3)] if fresh else None,
                     "face": self.face_seen, "actions": self.actions, "has_face_model": self.face.det is not None}
 
@@ -177,8 +183,10 @@ class Follower:
         threading.Thread(target=self._run, daemon=True).start()
         self.log(f"🐕 따라가기 시작 (거리 {self.dist_goal}m, 하트 {'켬' if self.heart else '끔'})")
 
-    def set(self, dist_goal=None, heart=None):
+    def set(self, dist_goal=None, heart=None, speed=None):
         with self.lock:
+            if speed:
+                self.speed = clip(float(speed), 0.2, MAX_V)
             if dist_goal:
                 self.dist_goal = clip(float(dist_goal), 0.8, 3.0)
             if heart is not None:
@@ -211,24 +219,35 @@ class Follower:
                     continue
                 dist, b, _ = r
                 err = dist - self.dist_goal
-                vyaw = clip(1.3 * b, -MAX_W, MAX_W)
-                if abs(b) > TURN_FIRST:
+                head = b                                   # 향할 방향 (기본: 사람 쪽)
+                state = "따라가는 중"
+                # 사이에 장애물이 있으면 길 찾기(A*)로 돌아가는 길의 다음 점을 향함
+                if err > 0.2 and p is not None:
+                    way = self._detour(p, dist, b, now)
+                    if way is not None:
+                        head = wrap(math.atan2(way[1] - p[1], way[0] - p[0]) - p[2])
+                        state = "장애물 돌아가는 중"
+                else:
+                    self._plan = None
+                vyaw = clip(1.8 * head, -MAX_W, MAX_W)
+                if abs(head) > TURN_FIRST:
                     vx = 0.0
-                    state = f"방향 맞추는 중 ({math.degrees(b):+.0f}°)"
+                    state = f"방향 맞추는 중 ({math.degrees(head):+.0f}°)" if state == "따라가는 중" else state
                 elif abs(err) < 0.2:
                     vx = 0.0
                     if abs(b) < 0.12:
                         vyaw = 0.0
                     state = "옆에 있어요"
                 elif err > 0:
-                    vx = clip(0.7 * err, 0.15, self.speed) * math.cos(b)
-                    state = "따라가는 중"
+                    # 멀수록 빠르게 (걷는 사람 속도 따라잡기), 방향이 틀어진 만큼 감속
+                    vx = clip(1.0 * err, 0.2, self.speed) * max(0.3, math.cos(head))
                 else:
-                    vx = clip(0.5 * err, -0.25, -0.1) if dist < self.dist_goal - 0.35 else 0.0
+                    vx = clip(0.5 * err, -0.3, -0.1) if dist < self.dist_goal - 0.35 else 0.0
                     state = "너무 가까워서 물러나는 중" if vx < 0 else "옆에 있어요"
                 if vx > 0 and self._front_blocked(p):
                     vx = 0.0
-                    state = "앞에 장애물 — 멈춤"
+                    self._plan_t = 0.0                      # 바로 다시 길 찾기
+                    state = "앞에 장애물 — 돌아갈 길 찾는 중"
                 if vx == 0 and vyaw == 0:
                     self.send_stop()
                 else:
@@ -241,6 +260,32 @@ class Follower:
                 self.active = False
                 self.msg = f"오류로 멈춤: {type(e).__name__}: {e}"
             self.log(self.msg)
+
+    def _detour(self, p, dist, b, now):
+        """로봇→사람 직선이 막혔으면 돌아가는 길의 다음 점(지도 좌표), 안 막혔으면 None."""
+        ex, ey = p[0] + dist * math.cos(p[2] + b), p[1] + dist * math.sin(p[2] + b)   # 리모컨(사람) 위치
+        ux, uy = (ex - p[0]) / max(dist, 1e-3), (ey - p[1]) / max(dist, 1e-3)
+        gx, gy = ex - ux * self.dist_goal, ey - uy * self.dist_goal                   # 사람 앞 목표 지점
+        obs, _ = self.get_obstacles()
+        if not len(obs):
+            self._plan = None
+            return None
+        # 직선 통로(폭 ±0.3m)에 장애물 점이 있나 — 로봇 몸 근처와 사람 주변(다리)은 제외
+        dx, dy = obs[:, 0] - p[0], obs[:, 1] - p[1]
+        along = dx * ux + dy * uy
+        side = -dx * uy + dy * ux
+        blocked = ((along > 0.45) & (along < dist - 0.6) & (np.abs(side) < 0.3)).sum() >= 3
+        if not blocked:
+            self._plan = None
+            return None
+        if self._plan is None or now - self._plan_t > 1.0:            # 1초마다 다시 계산
+            path, _ = plan(obs, (p[0], p[1]), (gx, gy))
+            self._plan, self._plan_t = (path[1:] if path else None), now
+        if not self._plan:
+            return None
+        while len(self._plan) > 1 and math.hypot(self._plan[0][0] - p[0], self._plan[0][1] - p[1]) < 0.3:
+            self._plan.pop(0)
+        return self._plan[0]
 
     def _front_blocked(self, pose):
         obs, _ = self.get_live()

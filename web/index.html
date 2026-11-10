@@ -181,6 +181,8 @@
       </div>
       <div class="navbar hidden" id="followbar">
         <span class="msg" id="followmsg"></span>
+        <label>속도 <select id="f-speed"><option value="0.5">느리게</option><option value="0.8" selected>보통</option>
+          <option value="1.2">빠르게</option></select></label>
         <label>거리 <select id="f-dist"><option value="1.0">1.0m</option><option value="1.3" selected>1.3m</option>
           <option value="1.8">1.8m</option><option value="2.5">2.5m</option></select></label>
         <label title="리모컨 든 사람이 로봇을 1초 넘게 바라보면 하트/인사"><input type="checkbox" id="f-heart" checked> 바라보면 하트</label>
@@ -684,6 +686,9 @@ function drawNavLayers(P){
       const g = n.goals[n.goals.length-1]; drawArrow(P, g[0], g[1], n.final_yaw, '#39d98a');
     }
   }
+  const fp = D && D.follow && D.follow.active && D.follow.plan;
+  if(fp && fp.length && view)                            // 따라가기: 장애물 돌아가는 길
+    drawLine(P, [[view.rx, view.ry], ...fp], 'rgba(255,111,181,.9)', 3, [8,5]);
   if(lastL && lastL.remote){                             // 따라가기 리모컨 위치 (분홍)
     const [u,v] = P(...lastL.remote);
     cx.fillStyle = '#ff6fb5'; cx.beginPath(); cx.arc(u, v, 8, 0, Math.PI*2); cx.fill();
@@ -886,9 +891,11 @@ $('b-follow').onclick = async () => {
   if(draft) return toast('경로 만들기를 먼저 끝내 주세요');
   setPick(null);
   if(!confirm('리모컨을 든 사람을 따라가요.\n· 로봇 주변을 비워 주세요 · 리모컨 비상정지(L2+B) 준비\n· 리모컨의 자체 따라가기 버튼은 누르지 마세요 (같이 움직이면 엉켜요)')) return;
-  const j = await api.post('/follow/start', {dist: parseFloat($('f-dist').value), heart: $('f-heart').checked, speed: Math.max(0.35, speedVal())});
+  const j = await api.post('/follow/start', {dist: parseFloat($('f-dist').value), heart: $('f-heart').checked,
+                                             speed: parseFloat($('f-speed').value)});
   if(!j.ok) toast(j.error || '시작하지 못했어요');
 };
+$('f-speed').onchange = () => api.post('/follow/set', {speed: parseFloat($('f-speed').value)});
 $('f-stop').onclick = () => api.post('/follow/stop');
 $('f-dist').onchange = () => api.post('/follow/set', {dist: parseFloat($('f-dist').value)});
 $('f-heart').onchange = () => api.post('/follow/set', {heart: $('f-heart').checked});

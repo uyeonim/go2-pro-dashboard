@@ -575,6 +575,7 @@ follower = Follower(
     send_stop=lambda: _sport_cmd("StopMove"),
     send_action=lambda name: _sport_cmd(name),
     log=log,
+    get_obstacles=_all_obstacles,
 )
 
 
@@ -702,7 +703,7 @@ def follow_action(action):
         nav.stop("따라가기 시작", quiet=True)
         follower.start(dist_goal=j.get("dist"), heart=j.get("heart"), speed=j.get("speed"))
     elif action == "set":
-        follower.set(dist_goal=j.get("dist"), heart=j.get("heart"))
+        follower.set(dist_goal=j.get("dist"), heart=j.get("heart"), speed=j.get("speed"))
     else:
         return jsonify({"ok": False, "error": "unknown"}), 404
     return jsonify({"ok": True})
