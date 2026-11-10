@@ -287,7 +287,23 @@ const LiveAPI = {
                                                 body: JSON.stringify(body || {})})).json(),
   routes: async () => (await fetch('/routes', {cache:'no-store'})).json(),
   // 서버가 밀어 보내는 영상 스트림을 읽어서 표시 (3초간 새 프레임이 없으면 다시 연결)
+  // 공개 주소로 보는 화면(다른 노트북·맥)은 사진을 한 장씩 계속 받아오는 방식:
+  // 사파리 등은 스트림(multipart)을 fetch로 못 읽는 경우가 있고, 공개 경로는 느려서 이게 더 안정적
   startCamera(show){
+    if(!IS_LOCAL){
+      (async function poll(){
+        while(true){
+          const t0 = Date.now();
+          try{
+            const r = await fetch('/frame?t=' + t0, {cache:'no-store'});
+            const b = await r.blob();
+            if(r.ok && b.size > 1000) show(b);
+          }catch(e){ await new Promise(r => setTimeout(r, 1000)); }
+          await new Promise(r => setTimeout(r, Math.max(0, 250 - (Date.now() - t0))));   // 최대 초당 4장
+        }
+      })();
+      return;
+    }
     let ctrl = null, last = Date.now();
     const findMarker = (buf, b2, from) => { for(let i=from; i<buf.length-1; i++) if(buf[i]===0xFF && buf[i+1]===b2) return i; return -1; };
     async function loop(){
@@ -316,7 +332,7 @@ const LiveAPI = {
     }
     // 서버는 최소 1초마다 프레임을 보내므로 오래 없으면 스트림이 멈춘 것
     // (공개 주소는 느려서 첫 장이 몇 초 걸릴 수 있음 → 더 오래 기다림)
-    setInterval(() => { if(Date.now() - last > (IS_LOCAL ? 3000 : 12000) && ctrl) ctrl.abort(); }, 1000);
+    setInterval(() => { if(Date.now() - last > 3000 && ctrl) ctrl.abort(); }, 1000);
     loop();
   },
 };
