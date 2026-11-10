@@ -27,6 +27,7 @@ import cv2
 import numpy as np
 from flask import Flask, Response, jsonify, redirect, request, send_from_directory, session
 
+from follow import Follower
 from mapstack import MapStack
 from navigator import Navigator
 from sensors import make_conn  # import 시 .env도 읽음
@@ -53,6 +54,7 @@ state = {
     "lidar": [], "lidar_t": 0.0,      # 위에서 본 [x, y] 점 목록 (m, 월드 좌표)
     "obs": np.zeros((0, 2)),          # 길 찾기용 LiDAR 점 전체 (화면용보다 촘촘)
     "conn": None, "loop": None,       # 이동 명령을 보낼 로봇 연결
+    "uwb": None, "uwb_t": 0.0,        # 따라가기 리모컨(UWB) 상태
     "obstacle_lidar": None,           # LiDAR로 계산한 [앞, 왼쪽, 뒤, 오른쪽] 거리 (m)
     "trail": [],                      # 지나온 경로 [[x, y], ...]
     "status": "연결 대기 중...",
@@ -186,6 +188,14 @@ def update_low(d):
     state["low_t"] = time.time()
 
 
+def update_uwb(d):
+    """따라가기 리모컨(UWB 태그) 상태: 로봇 기준 리모컨 거리·방향 등"""
+    state["uwb"] = d
+    state["uwb_t"] = time.time()
+    state["uwb_n"] = state.get("uwb_n", 0) + 1
+    follower.feed_uwb(d)
+
+
 def lidar_obstacles(xy, rx, ry, yaw, reach=4.0):
     """LiDAR 점(월드 좌표)을 로봇 기준으로 돌려서 앞/왼쪽/뒤/오른쪽 가장 가까운 거리 계산."""
     if len(xy) == 0:
@@ -275,6 +285,7 @@ def robot_thread(args):
                 sub = conn.datachannel.pub_sub.subscribe
                 sub(RTC_TOPIC["LF_SPORT_MOD_STATE"], lambda m: update_sport(m["data"]))
                 sub(RTC_TOPIC["LOW_STATE"], lambda m: update_low(m["data"]))
+                sub(RTC_TOPIC["UWB_STATE"], lambda m: update_uwb(m["data"]))   # 따라가기 리모컨(UWB 태그)
                 conn.video.switchVideoChannel(True)
                 conn.video.add_track_callback(on_track)
                 try:  # LiDAR 켜기 + 구독 (실패해도 영상/센서는 계속)
@@ -304,6 +315,7 @@ def robot_thread(args):
                         continue
                     break
                 nav.stop("로봇 연결 끊김")
+                follower.stop("로봇 연결 끊김")
                 state.update(connected=False, phase="reconnecting", error=reason,
                              status=f"{reason} — 재연결 중...", conn=None)
                 log(f"⚠ {reason} → 재연결")
@@ -350,7 +362,7 @@ def demo_thread():
     log("✅ 데모 모드 — 가짜 데이터 생성 중")
     room = _demo_room()
     t0 = time.time()
-    last_cam = last_lidar = 0.0
+    last_cam = last_lidar = last_uwb = 0.0
     t_prev = time.time()
     while True:
         t = time.time() - t0
@@ -404,6 +416,15 @@ def demo_thread():
             cv2.putText(img, f"{time.strftime('%H:%M:%S')}  x={x:+.2f} y={y:+.2f}", (30, 515),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (230, 230, 230), 2)
             set_frame(img)
+        if t - last_uwb > 0.1:                          # 가짜 리모컨: 방 안을 천천히 걷는 사람
+            last_uwb = t
+            hx, hy = 1.8 * math.cos(0.08 * t + 2.0), 1.4 * math.sin(0.16 * t + 2.0)
+            bearing = math.atan2(hy - y, hx - x) - yaw + np.random.normal(0, 0.08)
+            if np.random.rand() < 0.05:                 # 실제처럼 가끔 앞뒤가 뒤집혀 튀는 값
+                bearing += math.pi
+            update_uwb({"distance_est": math.hypot(hx - x, hy - y) + np.random.normal(0, 0.05),
+                        "tag_yaw": (bearing + math.pi) % (2 * math.pi) - math.pi,
+                        "yaw_est": bearing + yaw, "base_yaw": yaw, "buttons": 0, "joystick": [0, 0]})
         if t - last_lidar > 0.5:
             last_lidar = t
             pts = room + np.random.normal(0, 0.01, room.shape)
@@ -546,6 +567,17 @@ nav = Navigator(
 )
 
 
+follower = Follower(
+    get_pose=_pose,
+    get_live_obstacles=lambda: (state["obs"], state["lidar_t"]),
+    get_jpeg=lambda: _latest_jpeg[0],
+    send_move=lambda vx, vyaw: _sport_cmd("Move", {"x": round(vx, 3), "y": 0, "z": round(vyaw, 3)}),
+    send_stop=lambda: _sport_cmd("StopMove"),
+    send_action=lambda name: _sport_cmd(name),
+    log=log,
+)
+
+
 def can_drive():
     """로봇을 움직이는 기능은 이 노트북 화면(127.0.0.1)에서만. 공개 주소(Tailscale/Cloudflare)로 온 요청은 막음."""
     if request.remote_addr not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
@@ -593,6 +625,7 @@ def nav_goto():
         return bad
     j = request.get_json(force=True)
     yaw = j.get("yaw")
+    follower.stop("클릭 이동")
     nav.start([(float(j["x"]), float(j["y"]))], name="클릭 이동", speed=j.get("speed"), final_yaw=yaw)
     log(f"🎯 클릭 이동: ({j['x']:.2f}, {j['y']:.2f})" + (f" 방향 {math.degrees(yaw):.0f}°" if yaw is not None else ""))
     return jsonify({"ok": True})
@@ -613,6 +646,8 @@ def nav_teleop():
     vyaw = max(-1.0, min(1.0, float(j.get("vyaw", 0))))
     if nav.active:
         nav.stop("방향키 조종", quiet=True)
+    if follower.active:
+        follower.stop("방향키 조종")
     if vx == vy == vyaw == 0:
         teleop["active"] = False
         _sport_cmd("StopMove")
@@ -640,6 +675,7 @@ def nav_run():
     if not r:
         return jsonify({"ok": False, "error": "경로를 찾을 수 없어요"}), 404
     goals = _local_to_world(r["points"], _pose())     # 지금 로봇 자리·방향을 경로의 출발점으로
+    follower.stop("경로 주행")
     nav.start(goals, loops=j.get("loops", 1), name=r["name"], speed=j.get("speed"))
     log(f"▶ 경로 주행: {r['name']} ({len(goals)}개 지점, {j.get('loops', 1)}바퀴)")
     return jsonify({"ok": True})
@@ -648,6 +684,27 @@ def nav_run():
 @app.route("/nav/stop", methods=["POST"])
 def nav_stop():
     nav.stop("정지 버튼")      # 정지는 누구든 (공개 주소에서도) 누를 수 있게
+    follower.stop("정지 버튼")
+    return jsonify({"ok": True})
+
+
+@app.route("/follow/<action>", methods=["POST"])
+def follow_action(action):
+    """1번 기능: 리모컨 든 사람 따라가기 (+ 바라보면 하트)"""
+    if action == "stop":
+        follower.stop("정지 버튼")
+        return jsonify({"ok": True})
+    bad = _drive_guard()
+    if bad:
+        return bad
+    j = request.get_json(silent=True) or {}
+    if action == "start":
+        nav.stop("따라가기 시작", quiet=True)
+        follower.start(dist_goal=j.get("dist"), heart=j.get("heart"), speed=j.get("speed"))
+    elif action == "set":
+        follower.set(dist_goal=j.get("dist"), heart=j.get("heart"))
+    else:
+        return jsonify({"ok": False, "error": "unknown"}), 404
     return jsonify({"ok": True})
 
 
@@ -883,6 +940,14 @@ def files(kind, sub):
     return send_from_directory(root, sub, as_attachment=True)  # send_from_directory가 폴더 밖 경로를 막아 줌
 
 
+@app.route("/uwb")
+def uwb_raw():
+    """리모컨(UWB) 원본 값 확인용"""
+    t = state.get("uwb_t")
+    return jsonify({"age": round(time.time() - t, 2) if t else None, "count": state.get("uwb_n", 0),
+                    "data": state.get("uwb")})
+
+
 @app.route("/trail/clear", methods=["POST"])
 def trail_clear():
     state["trail"].clear()
@@ -900,7 +965,8 @@ def data():
         "video_age": age(_latest_t[0]), "sport_age": age(state["sport_t"]),
         "lidar_age": age(state["lidar_t"]), "recording": recorder.status(),
         "obstacle_lidar": state["obstacle_lidar"],
-        "can_drive": can_drive(), "nav": nav.status(),
+        "can_drive": can_drive(), "nav": nav.status(), "follow": follower.status(),
+        "uwb_buttons": (state["uwb"] or {}).get("buttons") if time.time() - state["uwb_t"] < 1 else None,
     }
     if s is not None:
         out.update({
@@ -936,7 +1002,17 @@ def lidar():
         "trail": tr[::step] + (tr[-1:] if tr and (len(tr) - 1) % step else []),
         "trail_len": round(sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(tr, tr[1:])), 2),
         "stack": mapst.info(),
+        "remote": _remote_world(p),
     })
+
+
+def _remote_world(p):
+    """리모컨(UWB) 위치를 지도 좌표로 — 지도에 분홍 점으로 표시"""
+    r = follower.remote()
+    if p is None or r is None or time.time() - r[2] > 1.0:
+        return None
+    d, b = r[0], r[1]
+    return [round(p[0] + d * math.cos(p[2] + b), 3), round(p[1] + d * math.sin(p[2] + b), 3)]
 
 
 if __name__ == "__main__":

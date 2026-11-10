@@ -161,6 +161,7 @@
     <section class="card" id="c-map">
       <h2>LiDAR · 위에서 본 지도 <span id="lidarinfo" class="sub"></span>
         <span class="acts">
+          <button class="btn hidden" id="b-follow" title="리모컨을 든 사람을 따라가요 (바라보면 하트)">🐕 따라가기</button>
           <button class="btn hidden" id="b-keys" title="켜면 키보드 방향키로 로봇을 조종해요">🎮 방향키</button>
           <button class="btn hidden" id="b-goto" title="켜고 지도를 클릭하면 로봇이 그곳으로 걸어가요">🎯 클릭 이동</button>
           <button class="btn hidden" id="b-draft" title="지도를 차례로 클릭해서 경로를 만들어 저장해요">✏️ 경로 만들기</button>
@@ -177,6 +178,13 @@
         <button class="btn" id="d-undo">되돌리기</button>
         <button class="btn" id="d-save">저장</button>
         <button class="btn" id="d-cancel">취소</button>
+      </div>
+      <div class="navbar hidden" id="followbar">
+        <span class="msg" id="followmsg"></span>
+        <label>거리 <select id="f-dist"><option value="1.0">1.0m</option><option value="1.3" selected>1.3m</option>
+          <option value="1.8">1.8m</option><option value="2.5">2.5m</option></select></label>
+        <label title="리모컨 든 사람이 로봇을 1초 넘게 바라보면 하트/인사"><input type="checkbox" id="f-heart" checked> 바라보면 하트</label>
+        <button class="btn stop" id="f-stop">⛔ 정지</button>
       </div>
       <div class="navbar hidden" id="navbar">
         <span class="msg" id="navmsg"></span>
@@ -676,6 +684,12 @@ function drawNavLayers(P){
       const g = n.goals[n.goals.length-1]; drawArrow(P, g[0], g[1], n.final_yaw, '#39d98a');
     }
   }
+  if(lastL && lastL.remote){                             // 따라가기 리모컨 위치 (분홍)
+    const [u,v] = P(...lastL.remote);
+    cx.fillStyle = '#ff6fb5'; cx.beginPath(); cx.arc(u, v, 8, 0, Math.PI*2); cx.fill();
+    cx.fillStyle = '#ff6fb5'; cx.font = 'bold 12px Segoe UI, Malgun Gothic, sans-serif'; cx.textAlign = 'left';
+    cx.textBaseline = 'middle'; cx.fillText('리모컨', u + 12, v);
+  }
   if(press && pickMode === 'goto'){                      // 끄는 중: 목표 + 방향 미리보기
     drawDots(P, [[press.x, press.y]], '#ffffff', false);
     if(press.yaw !== null) drawArrow(P, press.x, press.y, press.yaw, '#ffffff');
@@ -865,6 +879,33 @@ $('dmaplist').addEventListener('click', async ev => {
   }
 });
 
+// ── 1번: 리모컨 든 사람 따라가기 (+ 바라보면 하트) ──
+$('b-follow').onclick = async () => {
+  const f = D && D.follow;
+  if(f && f.active){ await api.post('/follow/stop'); return; }
+  if(draft) return toast('경로 만들기를 먼저 끝내 주세요');
+  setPick(null);
+  if(!confirm('리모컨을 든 사람을 따라가요.\n· 로봇 주변을 비워 주세요 · 리모컨 비상정지(L2+B) 준비\n· 리모컨의 자체 따라가기 버튼은 누르지 마세요 (같이 움직이면 엉켜요)')) return;
+  const j = await api.post('/follow/start', {dist: parseFloat($('f-dist').value), heart: $('f-heart').checked, speed: Math.max(0.35, speedVal())});
+  if(!j.ok) toast(j.error || '시작하지 못했어요');
+};
+$('f-stop').onclick = () => api.post('/follow/stop');
+$('f-dist').onchange = () => api.post('/follow/set', {dist: parseFloat($('f-dist').value)});
+$('f-heart').onchange = () => api.post('/follow/set', {heart: $('f-heart').checked});
+function renderFollow(){
+  const f = D.follow || {};
+  $('b-follow').classList.toggle('hidden', !D.can_drive);
+  $('b-follow').disabled = !(D.can_drive && D.connected);
+  $('b-follow').classList.toggle('on', !!f.active);
+  $('b-follow').textContent = f.active ? '🐕 따라가는 중 · 끄기' : '🐕 따라가기';
+  $('followbar').classList.toggle('hidden', !f.active);
+  if(f.active){
+    $('followbar').className = 'navbar run';
+    const face = f.heart ? (f.has_face_model ? ` · 얼굴: ${f.face || '안 보임'}` : ' · 얼굴 인식 모델 없음') : '';
+    $('followmsg').textContent = `🐕 ${f.msg}${face}${f.actions ? ` · 하트/인사 ${f.actions}번` : ''}`;
+  }
+}
+
 async function navStop(){ try{ await api.post('/nav/stop'); }catch(e){} toast('정지했어요'); }
 $('b-stop').onclick = navStop;
 $('b-navok').onclick = () => { navSeenResult = D && D.nav && D.nav.result + D.nav.msg; renderNav(); };
@@ -872,7 +913,8 @@ document.addEventListener('keydown', ev => {
   if(pickMode === 'keys' && (ARROWS.includes(ev.key) || ev.key === 'Shift') && !/INPUT|TEXTAREA|SELECT/.test(ev.target.tagName)){
     ev.preventDefault(); held.add(ev.key); return;          // 페이지 스크롤 대신 로봇 조종
   }
-  if((ev.key === 'Escape' || ev.key === ' ') && D && D.nav && D.nav.active && !/INPUT|TEXTAREA|SELECT/.test(ev.target.tagName)){
+  if((ev.key === 'Escape' || ev.key === ' ') && D && ((D.nav && D.nav.active) || (D.follow && D.follow.active))
+     && !/INPUT|TEXTAREA|SELECT/.test(ev.target.tagName)){
     ev.preventDefault(); navStop();
   } else if(ev.key === 'Escape'){ if(draft) $('d-cancel').click(); else setPick(null); }
 });
@@ -895,6 +937,7 @@ function renderNav(){
   $('b-stop').classList.toggle('hidden', !n.active);
   $('b-navok').classList.toggle('hidden', !!n.active);
   if(wasActive !== !!n.active){ wasActive = !!n.active; renderRoutes(); }
+  renderFollow();
 }
 
 // ── 고정 주소 입구: 노트북의 실제 대시보드가 켜져 있으면 그리로 이동 ──
