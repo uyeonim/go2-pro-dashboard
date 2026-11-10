@@ -92,6 +92,11 @@ bash /mnt/c/Users/yeonwoo/robotdog/ros2/run_detector.sh   # 다른 WSL 창에서
 
 대시보드를 **이 노트북에서(`http://127.0.0.1:8000`)** 열면 LiDAR 지도 위에 버튼이 생깁니다.
 
+- **말로 시키기** (3번 과제, `agent.py`): 오른쪽 칸에 글이나 🎤(크롬 음성 인식)로 말하면 Claude(`claude-opus-5-5`, effort low)가
+  도구를 골라 실행합니다 — 상태 확인, 장소 저장·이동(로봇 내장 내비게이션), 조금 이동, 동작(하트·인사·앉기 등, 점프·뒤집기는 제외), 카메라 보기, 따라가기, 순찰, 정지.
+  허용한 도구만 실행되고 ⛔ 정지가 다음 단계도 멈춥니다. `.env`에 `ANTHROPIC_API_KEY` 필요 (요청 한 번에 몇 센트).
+- **🗺 로봇 지도** (앱의 3D LiDAR Mapping으로 딴 지도 = 로봇 내장 SLAM): 📍 위치 지정 → 🎯 목표 이동 / 🔁 순찰 / 🚫 가지 말 곳(2D 지도에 칠해서 로봇에 올림, 원본은 `maps/robot/map_orig.pgm`).
+  명령 형식은 `unitree_ui/docs/slam.md` (`rt/uslam/client_command`에 `mapping/start` 같은 문자열). 내장 SLAM이 켜져 있으면 실시간 LiDAR(voxel)가 안 올 수 있음 → 리모컨 버튼을 누르면 내장 SLAM이 꺼짐.
 - **🐕 따라가기** (1번 과제): 세트 리모컨(UWB 태그)을 든 사람을 정한 거리(1.0~2.5m)로 따라갑니다. 리모컨 위치는 지도에 분홍 점.
   리모컨 든 사람이 로봇을 **1초 넘게 바라보면 하트 ↔ 인사**를 번갈아 합니다(12초 간격). 얼굴은 OpenCV YuNet(`models/`, MIT)으로 찾고,
   코가 두 눈 가운데면 "보는 중", 그 얼굴이 리모컨 방향과 맞을 때만 반응합니다. 리모컨 값: `rt/uwbstate`의 `distance_est`(m), `orientation_est`(로봇 정면 기준 리모컨 방향, 왼쪽 +). `tag_yaw`는 리모컨 자체 방향이라 위치가 아님.

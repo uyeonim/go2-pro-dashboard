@@ -29,6 +29,7 @@ from flask import Flask, Response, jsonify, redirect, request, send_from_directo
 
 from follow import Follower
 from mapstack import MapStack
+from agent import RobotAgent
 from robotslam import RobotSlam
 from navigator import Navigator
 from sensors import make_conn  # import 시 .env도 읽음
@@ -795,6 +796,7 @@ def nav_run():
 
 @app.route("/nav/stop", methods=["POST"])
 def nav_stop():
+    agent.stop()              # 말로 시키기 중이면 다음 단계도 멈춤
     nav.stop("정지 버튼")      # 정지는 누구든 (공개 주소에서도) 누를 수 있게
     follower.stop("정지 버튼")
     if rslam.busy():
@@ -1244,7 +1246,120 @@ def rslam_patrol():
 
 @app.route("/rslam/stop", methods=["POST"])
 def rslam_stop():
+    agent.stop()
     rslam.stop()          # 정지는 누구든
+    return jsonify({"ok": True})
+
+
+# ───────────────────────── 말로 시키기 (LLM 에이전트) ─────────────────────────
+def _stop_all():
+    nav.stop("정지", quiet=True)
+    follower.stop("정지")
+    if rslam.busy():
+        rslam.stop()
+
+
+def _agent_status():
+    low, s = state["low"], rslam.status()
+    return {"battery_pct": low["bms_state"]["soc"] if low else None, "robot_connected": state["connected"],
+            "map_localized": s["localized"], "map_pose": [round(v, 2) for v in s["pose"]] if s["pose"] else None,
+            "robot_navigating": s["nav_active"], "nav_state": s["nav_state"], "patrolling": s["patrol_active"],
+            "dashboard_nav": nav.status()["msg"] if nav.active else None,
+            "following": follower.active, "remote_distance_m": (follower.status()["remote"] or [None])[0]}
+
+
+def _agent_goto_map(x, y, yaw):
+    if not state["connected"]:
+        return "로봇이 연결돼 있지 않아요"
+    if not rslam.localized:
+        return "로봇 지도 위 위치를 몰라요 (로봇 지도 화면에서 📍 위치 지정 필요)"
+    nav.stop("에이전트", quiet=True)
+    follower.stop("에이전트")
+    rslam.goto(x, y, yaw)
+    return None
+
+
+def _agent_nav_relative(fwd, left, turn, cancel):
+    """지금 자리 기준 상대 이동: 로봇 지도 위치를 알면 내장 내비게이션, 아니면 대시보드 길 찾기"""
+    if rslam.localized and rslam.pose:
+        x, y, yaw = rslam.pose[:3]
+        gx, gy = x + fwd * math.cos(yaw) - left * math.sin(yaw), y + fwd * math.sin(yaw) + left * math.cos(yaw)
+        err = _agent_goto_map(gx, gy, yaw + turn)
+        return f"실패: {err}" if err else agent._wait_nav(timeout=60)
+    p = _pose()
+    if p is None or not state["connected"]:
+        return "실패: 로봇 위치를 몰라요"
+    x, y, yaw = p[:3]
+    gx, gy = x + fwd * math.cos(yaw) - left * math.sin(yaw), y + fwd * math.sin(yaw) + left * math.cos(yaw)
+    follower.stop("에이전트")
+    nav.start([(gx, gy)], name="말로 이동", final_yaw=yaw + turn)
+    t0 = time.time()
+    while nav.active and time.time() - t0 < 60:
+        if cancel.is_set():
+            nav.stop("에이전트 취소")
+            return "취소됨"
+        time.sleep(0.3)
+    return nav.status()["msg"]
+
+
+def _agent_follow(on):
+    if not on:
+        follower.stop("에이전트")
+        return "따라가기를 껐어요."
+    r = follower.remote()
+    if r is None or time.time() - r[2] > 1.0:
+        return "실패: 리모컨 신호가 없어요 (리모컨을 켜고 로봇 근처에서 들어 주세요)."
+    nav.stop("따라가기", quiet=True)
+    if rslam.busy():
+        rslam.stop()
+    follower.start()
+    return f"따라가기 시작 (리모컨까지 {r[0]:.1f}m)."
+
+
+def _agent_patrol(pts, loops):
+    if not rslam.localized:
+        return "로봇 지도 위 위치를 몰라요"
+    if len(pts) < 2:
+        return "순찰 장소가 2개 이상 필요해요"
+    nav.stop("순찰", quiet=True)
+    follower.stop("순찰")
+    threading.Thread(target=rslam.patrol, args=([tuple(p) for p in pts], loops), daemon=True).start()
+    return None
+
+
+agent = RobotAgent(robot={
+    "status": _agent_status, "pose_map": lambda: rslam.pose[:3] if rslam.localized and rslam.pose else None,
+    "goto_map": _agent_goto_map, "rslam_state": rslam.status, "nav_relative": _agent_nav_relative,
+    "action": lambda name: _sport_cmd(name), "jpeg": lambda: _latest_jpeg[0], "follow": _agent_follow,
+    "patrol": _agent_patrol, "stop": _stop_all,
+}, places_file=os.path.join(ROBOT_MAP_DIR, "places.json"), log=log)
+
+
+@app.route("/agent/ask", methods=["POST"])
+def agent_ask():
+    if not can_drive():
+        return jsonify({"ok": False, "error": "노트북 화면에서만 할 수 있어요"}), 403
+    text = str((request.get_json(silent=True) or {}).get("text", "")).strip()[:500]
+    if not text:
+        return jsonify({"ok": False, "error": "할 말을 입력해 주세요"}), 400
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return jsonify({"ok": False, "error": ".env에 ANTHROPIC_API_KEY가 없어요"}), 409
+    if not agent.ask(text):
+        return jsonify({"ok": False, "error": "아직 이전 명령을 하는 중이에요"}), 409
+    log(f"🗣 말로 시키기: {text}")
+    return jsonify({"ok": True})
+
+
+@app.route("/agent/state")
+def agent_state():
+    return jsonify({"busy": agent.busy, "chat": agent.chat[-30:], "places": agent.places()})
+
+
+@app.route("/agent/reset", methods=["POST"])
+def agent_reset():
+    if not can_drive():
+        return jsonify({"ok": False}), 403
+    agent.reset()
     return jsonify({"ok": True})
 
 
