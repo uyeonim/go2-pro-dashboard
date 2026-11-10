@@ -1351,7 +1351,7 @@ def robot_say(text):
         t0 = time.time()
         try:
             n = asyncio.run_coroutine_threadsafe(
-                speech.play_on_robot(conn.datachannel.pub_sub, wav, sec), loop).result(60 + sec)
+                speech.play_on_robot(conn.datachannel.pub_sub, wav, sec, log=log), loop).result(60 + sec)
         except Exception as e:
             return f"로봇 스피커로 보내기 실패: {e!r}"
         log(f"🗣 로봇이 말함 ({sec:.1f}초, {n}조각, {time.time() - t0:.1f}초 걸림): {text}")

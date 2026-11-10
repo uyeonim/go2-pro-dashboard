@@ -12,7 +12,7 @@ import tempfile
 import wave
 
 RATE = 16000             # 작게 만들어야 빨리 올라감 (16kHz 16bit 모노 ≈ 32KB/초)
-CHUNK = 4096             # base64 글자 수 (라이브러리와 같음)
+CHUNK = 16384            # base64 글자 수 (라이브러리는 4096 — 크게 보내면 조각 수가 줄어 빨라짐)
 MAX_CHARS = 200
 
 _PS = r"""
@@ -59,7 +59,7 @@ def tts_wav(text):
             pass
 
 
-async def play_on_robot(pub_sub, wav, seconds, log=print):
+async def play_on_robot(pub_sub, wav, seconds, log=print, chunk=None):
     """메가폰으로 wav 재생하고, 다 말할 때까지 기다렸다가 메가폰 끄기"""
     topic = "rt/api/audiohub/request"
 
@@ -68,12 +68,15 @@ async def play_on_robot(pub_sub, wav, seconds, log=print):
             topic, {"api_id": api_id, "parameter": json.dumps(param, ensure_ascii=True)}), 5)
 
     b64 = base64.b64encode(wav).decode()
-    chunks = [b64[i:i + CHUNK] for i in range(0, len(b64), CHUNK)]
+    chunk = chunk or CHUNK
+    chunks = [b64[i:i + chunk] for i in range(0, len(b64), chunk)]
+    t0 = asyncio.get_running_loop().time()
     await req(4001, {})                          # ENTER_MEGAPHONE
     try:
         for i, ch in enumerate(chunks, 1):
             await req(4003, {"current_block_size": len(ch), "block_content": ch,
                              "current_block_index": i, "total_block_number": len(chunks)})
+        log(f"🗣 로봇에 음성 올림: {len(chunks)}조각, {asyncio.get_running_loop().time() - t0:.1f}초")
         await asyncio.sleep(seconds + 0.8)       # 재생 끝날 때까지
     finally:
         try:
