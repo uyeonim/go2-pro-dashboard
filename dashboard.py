@@ -51,6 +51,28 @@ def _deal_lidar_keep_uslam(self, buffer):
 
 _wdc.WebRTCDataChannel.deal_array_buffer_for_lidar = _deal_lidar_keep_uslam
 
+# 라이브러리 버그: 파일 내려받기(request_static_file)가 첫 조각만 받고 끝남 → 마지막 조각까지 모은 뒤에 넘기게 고침
+from unitree_webrtc_connect.msgs import future_resolver as _fr  # noqa: E402
+from unitree_webrtc_connect.util import get_nested_field as _gnf  # noqa: E402
+
+
+def _resolve_file_all_chunks(self, message):
+    key = self.generate_message_key(message["type"], message.get("topic", ""),
+                                    _gnf(message, "info", "req_uuid") or _gnf(message, "info", "uuid"))
+    fi = _gnf(message, "info", "file")
+    if fi and fi.get("enable_chunking"):
+        part = fi.get("data") or ""
+        self.chunk_data_storage.setdefault(key, []).append(part.encode() if isinstance(part, str) else part)
+        if (fi.get("chunk_index") or 0) < (fi.get("total_chunk_num") or 0):
+            return                                            # 아직 조각이 더 옴
+        message["info"]["file"]["data"] = b"".join(self.chunk_data_storage.pop(key, []))
+    for fut in self.pending_callbacks.pop(key, []):
+        if fut and not fut.done():
+            fut.set_result(message)
+
+
+_fr.FutureResolver.run_resolve_for_topic_for_file = _resolve_file_all_chunks
+
 # 접속 정보는 .env에서 읽음 (sensors.py의 load_env). 코드에 키를 적지 않음.
 DEFAULT_IP = os.environ.get("UNITREE_ROBOT_IP")
 DEFAULT_KEY = os.environ.get("UNITREE_AES_128_KEY")
@@ -1041,6 +1063,36 @@ def uslam_cmd():
     uslam_log.append([time.strftime("%H:%M:%S"), f">> {cmd}"])
     log(f"🗺 내장 SLAM 명령: {cmd}")
     return jsonify({"ok": True})
+
+
+ROBOT_MAP_DIR = os.path.join(BASE, "maps", "robot")   # 로봇 내장 SLAM 지도(앱에서 딴 지도 등)를 내려받는 곳
+
+
+@app.route("/uslam/fetch", methods=["POST"])
+def uslam_fetch():
+    """로봇의 지도 칸에서 파일 내려받기: map.pgm(2D) / map.txt(원점·해상도) / map.pcd(3D)"""
+    if not can_drive():
+        return jsonify({"ok": False, "error": "노트북 화면에서만 할 수 있어요"}), 403
+    name = str((request.get_json(silent=True) or {}).get("file", ""))
+    if name not in ("map.pgm", "map.txt", "map.pcd"):
+        return jsonify({"ok": False, "error": "map.pgm / map.txt / map.pcd 중 하나"}), 400
+    conn, loop = state["conn"], state["loop"]
+    if conn is None or loop is None:
+        return jsonify({"ok": False, "error": "로봇이 연결돼 있지 않아요"}), 409
+    from unitree_webrtc_connect.msgs.rtc_inner_req import WebRTCDataChannelFileDownloader
+    dl = WebRTCDataChannelFileDownloader(conn.datachannel.channel, conn.datachannel.pub_sub)
+    fut = asyncio.run_coroutine_threadsafe(asyncio.wait_for(dl.download_file(name), 60), loop)
+    try:
+        data = fut.result(70)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"내려받기 실패: {type(e).__name__}"}), 504
+    if not isinstance(data, (bytes, bytearray)):
+        return jsonify({"ok": False, "error": f"내려받기 실패: {data}"}), 502
+    os.makedirs(ROBOT_MAP_DIR, exist_ok=True)
+    with open(os.path.join(ROBOT_MAP_DIR, name), "wb") as f:
+        f.write(data)
+    log(f"📥 로봇 지도 파일 받음: maps/robot/{name} ({len(data)} bytes)")
+    return jsonify({"ok": True, "bytes": len(data)})
 
 
 @app.route("/uslam/log")
