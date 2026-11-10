@@ -32,6 +32,24 @@ from mapstack import MapStack
 from navigator import Navigator
 from sensors import make_conn  # import 시 .env도 읽음
 from unitree_webrtc_connect import RTC_TOPIC, SPORT_CMD
+from unitree_webrtc_connect import webrtc_datachannel as _wdc
+
+# 로봇 내장 SLAM의 점구름(rt/uslam/...)은 LiDAR 바이너리 경로로 오는데 형식이 달라서 라이브러리 디코더가
+# KeyError('src_size')로 버림 → uslam 주제는 원본 바이트를 그대로 넘기게 고침 (점 하나 = uint16 x3, 범위 xmin~zmax)
+_orig_lidar = _wdc.WebRTCDataChannel.deal_array_buffer_for_lidar
+
+
+def _deal_lidar_keep_uslam(self, buffer):
+    import struct
+    hl, = struct.unpack_from("<I", buffer, 0)
+    head = json.loads(bytes(buffer[8:8 + hl]).decode("utf-8"))
+    if "uslam" in head.get("topic", ""):
+        head["data"]["data"] = bytes(buffer[8 + hl:])
+        return head
+    return _orig_lidar(self, buffer)
+
+
+_wdc.WebRTCDataChannel.deal_array_buffer_for_lidar = _deal_lidar_keep_uslam
 
 # 접속 정보는 .env에서 읽음 (sensors.py의 load_env). 코드에 키를 적지 않음.
 DEFAULT_IP = os.environ.get("UNITREE_ROBOT_IP")
@@ -212,7 +230,26 @@ def _shape(v, depth=0):
     return v
 
 
+uslam_log = []   # 로봇 내장 SLAM(uslam_server)의 응답·상태 문자열 (rt/uslam/server_log)
+
+
 def probe_msg(tp, m):
+    if tp == "rt/uslam/server_log":
+        d = m.get("data") if isinstance(m, dict) else m
+        txt = d.get("data") if isinstance(d, dict) else d
+        uslam_log.append([time.strftime("%H:%M:%S"), str(txt)[:300]])
+        del uslam_log[:-200]
+    if tp == "rt/uslam/frontend/cloud_world_ds" and probe.get(tp, {}).get("n", 0) < 6:   # 분석용 샘플 몇 개 저장
+        try:
+            d = m["data"]
+            os.makedirs(os.path.join(BASE, "logs", "uslam"), exist_ok=True)
+            k = probe.get(tp, {}).get("n", 0)
+            with open(os.path.join(BASE, "logs", "uslam", f"cloud_{k}.bin"), "wb") as f:
+                f.write(d["data"])
+            with open(os.path.join(BASE, "logs", "uslam", f"cloud_{k}.json"), "w") as f:
+                json.dump({kk: vv for kk, vv in d.items() if kk != "data"}, f)
+        except Exception as e:
+            log(f"uslam 샘플 저장 실패: {e}")
     p = probe.setdefault(tp, {"n": 0, "first": time.time()})
     p["n"] += 1
     p["last"] = time.time()
@@ -984,6 +1021,31 @@ def probe_view():
     return jsonify({tp: {"n": p["n"], "hz": round(p["n"] / max(1e-3, p["last"] - p["first"]), 1) if p["n"] > 1 else None,
                          "age": round(now - p["last"], 1), "sample": p.get("sample")}
                     for tp, p in probe.items()} | {"_not_received": [t for t in PROBE_TOPICS if t not in probe]})
+
+
+USLAM_SAFE = ("mapping/", "localization/", "common/")   # 로봇이 스스로 걷지 않는 명령만 (navigation/patrol은 나중에)
+
+
+@app.route("/uslam/cmd", methods=["POST"])
+def uslam_cmd():
+    """로봇 내장 SLAM에 문자열 명령 (예: mapping/get_status, mapping/start, mapping/stop). docs: unitree_ui/docs/slam.md"""
+    if not can_drive():
+        return jsonify({"ok": False, "error": "노트북 화면에서만 할 수 있어요"}), 403
+    cmd = str((request.get_json(silent=True) or {}).get("cmd", "")).strip()
+    if not cmd.startswith(USLAM_SAFE) and not cmd.endswith("/get_status"):
+        return jsonify({"ok": False, "error": "아직 허용하지 않은 명령이에요"}), 400
+    conn = state["conn"]
+    if conn is None or state["loop"] is None:
+        return jsonify({"ok": False, "error": "로봇이 연결돼 있지 않아요"}), 409
+    state["loop"].call_soon_threadsafe(conn.datachannel.pub_sub.publish_without_callback, "rt/uslam/client_command", cmd)
+    uslam_log.append([time.strftime("%H:%M:%S"), f">> {cmd}"])
+    log(f"🗺 내장 SLAM 명령: {cmd}")
+    return jsonify({"ok": True})
+
+
+@app.route("/uslam/log")
+def uslam_log_view():
+    return jsonify(uslam_log[-60:])
 
 
 @app.route("/uwb")
