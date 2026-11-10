@@ -3,7 +3,7 @@
 "문 앞에 갔다가 하트하고 돌아와" → Claude가 아래 도구 중에서 골라 순서대로 부르고, 우리 코드가 실행.
 허용한 도구만 실행되므로 안전장치(속도 제한·정지 버튼·리모컨 비상정지)는 그대로.
 
-도구: get_status, list_places, save_place, go_to_place, move_relative, do_action, look, follow_me, patrol_places, stop
+도구: get_status, say, list_places, save_place, go_to_place, move_relative, do_action, look, follow_me, patrol_places, stop
 장소는 로봇 내장 SLAM 지도 좌표로 maps/robot/places.json 에 저장 (go_to_place는 내장 내비게이션 사용).
 API 키: .env 의 ANTHROPIC_API_KEY (sensors.load_env가 읽음).
 """
@@ -32,11 +32,15 @@ SYSTEM = """너는 연구실의 Unitree Go2 로봇개를 조종하는 비서야.
 - 동작(do_action)은 로봇이 서 있을 때 해. 누워 있거나 앉아 있으면 먼저 stand_up.
 - 사람이 위험하다고 하거나 "멈춰/그만"이라고 하면 바로 stop.
 - 카메라로 봐야 답할 수 있는 질문이면 look을 써.
+- "~라고 말해", "인사해 봐(말로)", "소개해 봐"처럼 로봇이 소리 내서 말해야 하면 say를 써. 짧고 자연스러운 한국어 한두 문장으로.
 - 확실하지 않은 큰 이동은 하지 말고 한 번 물어봐."""
 
 TOOLS = [
     {"name": "get_status", "description": "로봇 상태: 배터리, 위치(지도 좌표), 위치를 찾았는지, 지금 하는 일.",
      "input_schema": {"type": "object", "properties": {}, "additionalProperties": False}},
+    {"name": "say", "description": "로봇 스피커로 소리 내서 말하기 (한국어, 200자 이하). 다 말할 때까지 기다림.",
+     "input_schema": {"type": "object", "properties": {"text": {"type": "string"}},
+                      "required": ["text"], "additionalProperties": False}},
     {"name": "list_places", "description": "저장된 장소 이름 목록과 좌표.",
      "input_schema": {"type": "object", "properties": {}, "additionalProperties": False}},
     {"name": "save_place", "description": "로봇이 지금 있는 자리(지도 좌표·방향)를 이름으로 저장.",
@@ -71,7 +75,7 @@ for _t in TOOLS:
 class RobotAgent:
     def __init__(self, robot, places_file, log=print):
         """robot: 대시보드가 넘겨주는 함수 모음 (dict) — status, pose_map, goto_map, rslam_state, nav_relative,
-        action, jpeg, follow, patrol, stop"""
+        action, jpeg, follow, patrol, stop, say"""
         self.robot, self.places_file, self.log = robot, places_file, log
         self.client = None
         self.lock = threading.Lock()
@@ -98,6 +102,9 @@ class RobotAgent:
         R = self.robot
         if name == "get_status":
             return json.dumps(R["status"](), ensure_ascii=False)
+        if name == "say":
+            err = R["say"](a["text"])
+            return f"실패: {err}" if err else "말했어요."
         if name == "list_places":
             p = self.places()
             return json.dumps(p, ensure_ascii=False) if p else "저장된 장소가 없어요."

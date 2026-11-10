@@ -282,7 +282,7 @@
       <h2>말로 시키기 <span class="sub">(Claude)</span>
         <span class="acts">
           <button class="btn" id="kw-btn" title="켜 두면 정해진 단어만 듣고 바로 동작해요 (Claude 안 씀): 인사 · 하트 · 엎드려 · 일어나 · 멈춰">👂 단어 듣기</button>
-          <label class="sub" title="Claude의 답을 소리로 읽어 줘요 (듣는 기능 아님)"><input type="checkbox" id="ag-tts"> 🔊 읽어주기</label>
+          <label class="sub" title="Claude의 답을 소리로 읽어 줘요 (듣는 기능 아님)">🔊 답 읽기 <select id="ag-tts"><option value="">끔</option><option value="pc">노트북</option><option value="robot">🐕 로봇</option></select></label>
           <button class="btn" id="ag-reset" title="대화 새로 시작">새 대화</button></span>
       </h2>
       <div id="ag-log" class="aglog"><div class="agmsg sys">예) "문 앞으로 가서 하트하고 돌아와", "앞에 뭐 보여?", "여기를 책상으로 저장해"</div></div>
@@ -292,6 +292,7 @@
         <button class="btn" id="ag-mic" title="눌러서 말하기 (크롬)">🎤</button>
         <input id="ag-text" placeholder="로봇에게 할 말…" autocomplete="off">
         <button class="btn" id="ag-send">보내기</button>
+        <button class="btn" id="ag-say" title="Claude를 거치지 않고, 쓴 글을 그대로 로봇 스피커로 말해요">🗣 로봇이 말하기</button>
       </div>
     </section>
     <section class="card hidden" id="c-dmap">
@@ -1145,6 +1146,15 @@ async function agSend(text){
   $('ag-text').value = ''; agPoll();
 }
 $('ag-send').onclick = () => agSend();
+async function robotSay(text){
+  const j = await api.post('/speak', {text});
+  if(!j.ok) toast(j.error || '말하지 못했어요');
+  return j.ok;
+}
+$('ag-say').onclick = async () => {
+  const text = $('ag-text').value.trim(); if(!text) return toast('로봇이 할 말을 입력해 주세요');
+  if(await robotSay(text)){ $('ag-text').value = ''; toast('🗣 로봇에게 보내는 중… (몇 초 걸려요)'); }
+};
 $('ag-text').addEventListener('keydown', ev => { if(ev.key === 'Enter' && !ev.isComposing){ ev.preventDefault(); agSend(); } });
 $('ag-reset').onclick = async () => { await api.post('/agent/reset'); agShown = -1; agPoll(); };
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -1206,7 +1216,9 @@ async function agPoll(){
     const last = s.chat.filter(m => m.role === 'assistant').slice(-1)[0];
     if(last && last.t > agSpokenT){
       agSpokenT = last.t;
-      if($('ag-tts').checked && window.speechSynthesis){ const u = new SpeechSynthesisUtterance(last.text); u.lang = 'ko-KR'; speechSynthesis.speak(u); }
+      const how = $('ag-tts').value;
+      if(how === 'pc' && window.speechSynthesis){ const u = new SpeechSynthesisUtterance(last.text); u.lang = 'ko-KR'; speechSynthesis.speak(u); }
+      if(how === 'robot') robotSay(last.text);
     }
   }
   const names = Object.keys(s.places || {});

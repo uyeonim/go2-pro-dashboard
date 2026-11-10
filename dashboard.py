@@ -31,6 +31,7 @@ from follow import Follower
 from mapstack import MapStack
 from agent import RobotAgent
 from robotslam import RobotSlam
+import speech
 from navigator import Navigator
 from sensors import make_conn  # import 시 .env도 읽음
 from unitree_webrtc_connect import RTC_TOPIC, SPORT_CMD
@@ -1328,7 +1329,52 @@ def _agent_patrol(pts, loops):
     return None
 
 
+_say_lock = threading.Lock()
+
+
+def robot_say(text):
+    """로봇 스피커로 말하기 (끝까지 말할 때까지 기다림). 성공하면 None, 아니면 오류 문자열."""
+    if not _say_lock.acquire(blocking=False):
+        return "아직 이전 말을 하는 중이에요"
+    try:
+        try:
+            wav, sec = speech.tts_wav(text)
+        except Exception as e:
+            return f"음성 만들기 실패: {e}"
+        if state["demo"]:
+            log(f"🗣 (데모) 로봇이 말함: {text}")
+            time.sleep(sec)
+            return None
+        conn, loop = state["conn"], state["loop"]
+        if conn is None or loop is None or not state["connected"]:
+            return "로봇이 연결돼 있지 않아요"
+        t0 = time.time()
+        try:
+            n = asyncio.run_coroutine_threadsafe(
+                speech.play_on_robot(conn.datachannel.pub_sub, wav, sec), loop).result(60 + sec)
+        except Exception as e:
+            return f"로봇 스피커로 보내기 실패: {e!r}"
+        log(f"🗣 로봇이 말함 ({sec:.1f}초, {n}조각, {time.time() - t0:.1f}초 걸림): {text}")
+        return None
+    finally:
+        _say_lock.release()
+
+
+@app.route("/speak", methods=["POST"])
+def speak():
+    if not can_drive():
+        return jsonify({"ok": False, "error": "노트북 화면에서만 할 수 있어요"}), 403
+    text = str((request.get_json(silent=True) or {}).get("text", "")).strip()[:speech.MAX_CHARS]
+    if not text:
+        return jsonify({"ok": False, "error": "말할 내용을 입력해 주세요"}), 400
+    if _say_lock.locked():
+        return jsonify({"ok": False, "error": "아직 이전 말을 하는 중이에요"}), 409
+    threading.Thread(target=robot_say, args=(text,), daemon=True).start()
+    return jsonify({"ok": True})
+
+
 agent = RobotAgent(robot={
+    "say": robot_say,
     "status": _agent_status, "pose_map": lambda: rslam.pose[:3] if rslam.localized and rslam.pose else None,
     "goto_map": _agent_goto_map, "rslam_state": rslam.status, "nav_relative": _agent_nav_relative,
     "action": lambda name: _sport_cmd(name), "jpeg": lambda: _latest_jpeg[0], "follow": _agent_follow,
