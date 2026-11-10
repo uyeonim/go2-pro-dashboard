@@ -94,6 +94,26 @@ class RobotSlam:
                 self.mapping = True
             elif "mapping/stop/success" in txt:
                 self.mapping = False
+        if ("RUN_AUTO_CHARGE" in txt or "NEED_CHARGE" in txt or "GO_TO_CHARGE_BOARD" in txt
+                or "REACH_PATROL_NUMBER_LIMIT" in txt):
+            # 순찰이 끝나서 충전대로 가려 함 → 멈춤 (충전대가 없으니 엉뚱한 데로 감)
+            threading.Thread(target=self._stop_charge, daemon=True).start()
+
+    def _stop_charge(self):
+        if getattr(self, "_stopping_charge", False):
+            return
+        self._stopping_charge = True
+        try:
+            self.log("🛑 순찰이 끝나 충전대로 가려는 걸 멈춰요")
+            for c in ("autocharge/stop", "patrol/stop", "navigation/stop"):
+                self.send_cmd(c)
+                time.sleep(0.2)
+            with self.lock:
+                self.patrol_active = self.nav_active = False
+                self.patrol_state, self.goal, self.path = "DONE", None, []
+        finally:
+            time.sleep(3)
+            self._stopping_charge = False
 
     def on_loc_odom(self, d):
         try:
@@ -155,9 +175,14 @@ class RobotSlam:
         for x, y, yaw in pts:
             self.send_cmd(f"patrol/add_patrol_point/{self._f(x)}/{self._f(y)}/{self._f(wrap(yaw))}")
             time.sleep(0.15)
-        self.send_cmd(f"patrol/set_patrol_number_limit/{int(loops)}")
-        time.sleep(0.15)
-        self.send_cmd("patrol/set_bms_soc_limit/1/99")   # 배터리로 자동 충전하러 가는 것 끔
+        # 자동 충전하러 가는 것 끄기 (설명서의 "Disable in Patrol" 설정) — 안 끄면 순찰이 끝나거나 시간이 지나면
+        # 충전대(지도 출발점 근처)로 가서 엎드리려 함 (책상 밑으로 들어가려던 원인)
+        for c in (f"patrol/set_patrol_number_limit/{int(loops)}", "patrol/set_total_time_limit/-1",
+                  "patrol/set_patrol_time_limit/-1", "patrol/set_charge_time_limit/0",
+                  "patrol/set_bms_soc_limit/1/99"):
+            self.send_cmd(c)
+            time.sleep(0.15)
+        self.send_cmd("autocharge/stop")
         time.sleep(0.15)
         self.send_cmd("patrol/go")
 

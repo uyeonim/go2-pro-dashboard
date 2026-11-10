@@ -260,8 +260,9 @@ def probe_msg(tp, m):
     d = m.get("data") if isinstance(m, dict) else m
     if tp == "rt/uslam/server_log":
         txt = d.get("data") if isinstance(d, dict) else d
-        uslam_log.append([time.strftime("%H:%M:%S"), str(txt)[:300]])
-        del uslam_log[:-200]
+        if not uslam_log or uslam_log[-1][1] != str(txt)[:300]:      # 같은 줄 반복은 한 번만
+            uslam_log.append([time.strftime("%H:%M:%S"), str(txt)[:300]])
+        del uslam_log[:-500]
         rslam.on_log(txt)
     elif tp == "rt/uslam/localization/odom" and isinstance(d, dict):
         rslam.on_loc_odom(d)
@@ -1063,7 +1064,7 @@ def probe_view():
                     for tp, p in probe.items()} | {"_not_received": [t for t in PROBE_TOPICS if t not in probe]})
 
 
-USLAM_SAFE = ("mapping/", "localization/", "common/")   # 로봇이 스스로 걷지 않는 명령만 (navigation/patrol은 나중에)
+USLAM_SAFE = ("mapping/", "localization/", "common/", "autocharge/stop")   # 로봇이 스스로 걷지 않는 명령만 (navigation/patrol은 나중에)
 
 
 @app.route("/uslam/cmd", methods=["POST"])
