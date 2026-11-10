@@ -185,8 +185,16 @@
         <button class="btn" id="rs-pose" title="지도에서 로봇이 지금 있는 곳을 누르고, 바라보는 방향으로 끌어요">📍 위치 지정</button>
         <button class="btn" id="rs-goal" title="갈 곳을 누르고, 도착해서 바라볼 방향으로 끌어요 (로봇이 스스로 길 찾음)">🎯 목표 이동</button>
         <button class="btn" id="rs-patrol" title="순찰 지점을 차례로 찍고 시작">🔁 순찰 만들기</button>
+        <button class="btn" id="rs-nogo" title="지도에 네모를 그려서 로봇이 안 가게 막아요 (책상 밑 등)">🚫 가지 말 곳</button>
         <button class="btn" id="rs-fetch" title="로봇에 저장된 지도를 다시 받아요 (앱에서 새로 땄을 때)">↻ 지도 받기</button>
         <button class="btn stop hidden" id="rs-stop">⛔ 정지</button>
+      </div>
+      <div class="navbar hidden" id="rsnbar">
+        <span class="msg" id="rsnmsg"></span>
+        <button class="btn" id="rsn-undo">되돌리기</button>
+        <button class="btn" id="rsn-clear">모두 지우기</button>
+        <button class="btn" id="rsn-apply" title="칠한 2D 지도를 로봇에 올려요 (원본은 노트북에 보관)">로봇에 적용</button>
+        <button class="btn" id="rsn-close">닫기</button>
       </div>
       <div class="navbar hidden" id="rspbar">
         <span class="msg" id="rspmsg"></span>
@@ -790,6 +798,7 @@ function rsDown(ev){
 function rsMove(ev){
   if(!rsPress) return;
   const w = rsWorld(ev);
+  if(rsPick === 'nogo'){ rsPress.x2 = w.x; rsPress.y2 = w.y; return drawRobotMap(); }
   rsPress.yaw = Math.hypot(w.u - rsPress.u, w.v - rsPress.v) > 12 ? Math.atan2(w.y - rsPress.y, w.x - rsPress.x) : null;
   drawRobotMap();
 }
@@ -797,6 +806,12 @@ async function rsUp(ev){
   if(!rsPress) return;
   const p = rsPress; rsPress = null;
   const yaw = p.yaw === null ? 0 : p.yaw;
+  if(rsPick === 'nogo'){
+    if(p.x2 === undefined || Math.abs(p.x2 - p.x) < 0.15 || Math.abs(p.y2 - p.y) < 0.15){ toast('네모를 끌어서 그려 주세요'); return drawRobotMap(); }
+    const zones = [...(RS().nogo || []), [p.x, p.y, p.x2, p.y2]];
+    await api.post('/rslam/nogo', {zones}); if(D && D.rslam) D.rslam.nogo = zones;
+    renderRs(); return drawRobotMap();
+  }
   if(rsPick === 'pose'){
     if(p.yaw === null){ toast('로봇이 바라보는 방향으로 끌어 주세요'); return drawRobotMap(); }
     const j = await api.post('/rslam/localize', {x: p.x, y: p.y, yaw});
@@ -815,9 +830,11 @@ function rsSetPick(m){
   $('rs-pose').classList.toggle('on', m === 'pose');
   $('rs-goal').classList.toggle('on', m === 'goal');
   $('rs-patrol').classList.toggle('on', m === 'patrol');
+  $('rs-nogo').classList.toggle('on', m === 'nogo');
   document.querySelector('.mapwrap').classList.toggle('pick', !!m);
   const hint = {pose: '로봇이 있는 곳을 누르고 → 로봇이 보는 방향으로 끌어서 놓기',
-                goal: '갈 곳 누르기 (끌면 도착 후 바라볼 방향)', patrol: '순찰 지점을 차례로 (끌면 그 지점에서 바라볼 방향)'}[m];
+                goal: '갈 곳 누르기 (끌면 도착 후 바라볼 방향)', patrol: '순찰 지점을 차례로 (끌면 그 지점에서 바라볼 방향)',
+                nogo: '막을 곳을 네모로 끌어서 그리기 → 다 그리면 로봇에 적용'}[m];
   $('maphint').classList.toggle('hidden', !hint); if(hint) $('maphint').textContent = hint;
   if(m !== 'patrol') rsDraft = rsDraft;   // 유지
   renderRs(); drawRobotMap();
@@ -837,6 +854,20 @@ $('rs-fetch').onclick = async () => {
   toast(j.ok ? '로봇 지도를 받았어요' : (j.error || '지도를 받지 못했어요'));
 };
 $('rs-stop').onclick = () => api.post('/rslam/stop');
+$('rs-nogo').onclick = () => rsSetPick(rsPick === 'nogo' ? null : 'nogo');
+$('rsn-close').onclick = () => rsSetPick(null);
+async function setZones(zones){ await api.post('/rslam/nogo', {zones}); if(D && D.rslam) D.rslam.nogo = zones; renderRs(); drawRobotMap(); }
+$('rsn-undo').onclick = () => setZones((RS().nogo || []).slice(0, -1));
+$('rsn-clear').onclick = () => { if(confirm('가지 말 곳을 모두 지울까요? (로봇에 적용해야 로봇도 바뀌어요)')) setZones([]); };
+$('rsn-apply').onclick = async () => {
+  const n = (RS().nogo || []).length;
+  if(!confirm(`가지 말 곳 ${n}개를 칠한 지도를 로봇에 올려요.\n(원본 지도는 노트북 maps/robot/map_orig.pgm 에 보관돼요)`)) return;
+  toast('로봇에 지도를 올리는 중… (10~30초)');
+  $('rsn-apply').disabled = true;
+  const j = await api.post('/rslam/nogo/apply');
+  $('rsn-apply').disabled = false;
+  toast(j.ok ? `적용했어요 — 다음 이동부터 가지 말 곳을 피해요 (${j.zones}개)` : (j.error || '적용하지 못했어요'));
+};
 $('rsp-undo').onclick = () => { rsDraft.pop(); renderRs(); drawRobotMap(); };
 $('rsp-cancel').onclick = () => { rsDraft = []; rsSetPick(null); };
 $('rsp-go').onclick = async () => {
@@ -854,6 +885,9 @@ function renderRs(){
   ['b-keys','b-goto','b-draft','b-trail'].forEach(id => $(id).classList.toggle('hidden', on || (id !== 'b-trail' && !(D && D.can_drive))));
   $('rsbar').classList.toggle('hidden', !on);
   $('rspbar').classList.toggle('hidden', !(on && rsPick === 'patrol'));
+  $('rsnbar').classList.toggle('hidden', !(on && rsPick === 'nogo'));
+  const nz = (s.nogo || []).length;
+  $('rsnmsg').textContent = `가지 말 곳 ${nz}개${s.nogo_dirty ? ' · ⚠ 아직 로봇에 적용 안 됨' : nz ? ' · ✅ 로봇에 적용됨' : ''}`;
   if(!on) return;
   const moving = s.nav_active || s.patrol_active;
   $('rs-stop').classList.toggle('hidden', !moving);
@@ -885,6 +919,14 @@ function drawRobotMap(){
   cx.strokeStyle = 'rgba(255,255,255,.05)'; cx.lineWidth = 1;           // 1m 격자
   for(let k = Math.floor(ccx - RANGE*1.7); k <= ccx + RANGE*1.7; k++){ const [,v] = P(k, ccy); cx.beginPath(); cx.moveTo(0,v); cx.lineTo(W,v); cx.stroke(); }
   for(let k = Math.floor(ccy - RANGE*2.7); k <= ccy + RANGE*2.7; k++){ const [u] = P(ccx, k); cx.beginPath(); cx.moveTo(u,0); cx.lineTo(u,H); cx.stroke(); }
+  const zs = (R.nogo || []).slice();                                       // 가지 말 곳 (빨강)
+  if(rsPress && rsPick === 'nogo' && rsPress.x2 !== undefined) zs.push([rsPress.x, rsPress.y, rsPress.x2, rsPress.y2]);
+  zs.forEach(([x0, y0, x1, y1]) => {
+    const [ua, va] = P(Math.max(x0, x1), Math.max(y0, y1)), [ub, vb] = P(Math.min(x0, x1), Math.min(y0, y1));
+    cx.fillStyle = 'rgba(255,84,112,.28)'; cx.fillRect(ua, va, ub - ua, vb - va);
+    cx.save(); cx.strokeStyle = '#ff5470'; cx.lineWidth = 2; if(R.nogo_dirty) cx.setLineDash([6,4]);
+    cx.strokeRect(ua, va, ub - ua, vb - va); cx.restore();
+  });
   const [u0, v0] = P(0, 0);                                                // 지도 만든 출발점
   cx.strokeStyle = 'rgba(255,176,32,.8)'; cx.lineWidth = 2; cx.beginPath(); cx.arc(u0, v0, 7, 0, Math.PI*2); cx.stroke();
   if(R.path && R.path.length > 1) drawLine(P, R.path, 'rgba(57,217,138,.95)', 3);

@@ -40,7 +40,70 @@ class RobotSlam:
         self.last = []            # 최근 로그
         self.meta = None          # 지도 정보
         self.png = None
+        self.map_id = None        # 로봇 지도 칸의 id (common/get_map_id)
+        self.nogo_file = os.path.join(map_dir, "nogo.json")
+        self.nogo = []            # 가지 말 곳 [[x0, y0, x1, y1], ...] (지도 좌표, m)
+        self.nogo_applied = []    # 마지막으로 로봇에 올린 것
+        try:
+            import json
+            with open(self.nogo_file, encoding="utf-8") as f:
+                d = json.load(f)
+            self.nogo, self.nogo_applied = d.get("zones", []), d.get("applied", [])
+        except Exception:
+            pass
         self.load_map()
+
+    # ── 가지 말 곳 (2D 지도에 장애물로 칠해서 로봇에 다시 올림) ──
+    def save_nogo(self, zones=None, applied=None):
+        import json
+        if zones is not None:
+            self.nogo = [[round(float(v), 3) for v in z] for z in zones]
+        if applied is not None:
+            self.nogo_applied = applied
+        os.makedirs(self.map_dir, exist_ok=True)
+        with open(self.nogo_file, "w", encoding="utf-8") as f:
+            json.dump({"zones": self.nogo, "applied": self.nogo_applied}, f)
+
+    def _read_pgm(self, path):
+        t = open(path, "rb").read().split()
+        w, h, mx = int(t[1]), int(t[2]), int(t[3])
+        return np.array(t[4:4 + w * h], dtype=np.int32).reshape(h, w), mx
+
+    def edited_pgm(self):
+        """원본 2D 지도(map_orig.pgm)에 가지 말 곳을 장애물(0)로 칠한 ASCII PGM 바이트 (로봇 원래 형식 그대로)"""
+        orig = os.path.join(self.map_dir, "map_orig.pgm")
+        if not os.path.exists(orig):
+            import shutil
+            shutil.copy(os.path.join(self.map_dir, "map.pgm"), orig)
+        a, mx = self._read_pgm(orig)
+        h, w = a.shape
+        m = self.meta
+        for x0, y0, x1, y1 in self.nogo:
+            c0, c1 = sorted((int((x0 - m["ox"]) / m["res"]), int((x1 - m["ox"]) / m["res"])))
+            r0, r1 = sorted((h - 1 - int((y0 - m["oy"]) / m["res"]), h - 1 - int((y1 - m["oy"]) / m["res"])))
+            a[max(0, r0):min(h, r1 + 1), max(0, c0):min(w, c1 + 1)] = 0
+        rows = ["".join(f"{v} " for v in row) for row in a.tolist()]
+        return (f"P2\n{w} {h}\n{mx}\n" + "\n".join(rows) + "\n").encode()
+
+    def after_upload(self, data):
+        with open(os.path.join(self.map_dir, "map_edited.pgm"), "wb") as f:
+            f.write(data)
+        with open(os.path.join(self.map_dir, "map.pgm"), "wb") as f:
+            f.write(data)
+        self.save_nogo(applied=self.nogo)
+        self.load_map()
+
+    def on_fetched_pgm(self):
+        """로봇에서 2D 지도를 새로 받았을 때: 우리가 올린 것이면 원본 유지, 앱에서 새로 딴 지도면 원본 교체 + 가지 말 곳 초기화"""
+        new = os.path.join(self.map_dir, "map.pgm")
+        ed = os.path.join(self.map_dir, "map_edited.pgm")
+        if os.path.exists(ed) and open(ed, "rb").read() == open(new, "rb").read():
+            return
+        import shutil
+        shutil.copy(new, os.path.join(self.map_dir, "map_orig.pgm"))
+        if self.nogo or self.nogo_applied:
+            self.log("🗺 새 지도라서 가지 말 곳을 비웠어요")
+        self.save_nogo(zones=[], applied=[])
 
     # ── 지도 ──
     def load_map(self):
@@ -90,6 +153,8 @@ class RobotSlam:
                 self.patrol_active, self.nav_active, self.path = False, False, []
             elif "patrol/state_transition/" in txt:
                 self.patrol_state = txt.rsplit("/", 1)[-1]
+            elif "common/get_map_id/map_id/" in txt:
+                self.map_id = txt.split("common/get_map_id/map_id/", 1)[1].strip()
             elif "mapping/start/success" in txt:
                 self.mapping = True
             elif "mapping/stop/success" in txt:
@@ -207,4 +272,5 @@ class RobotSlam:
                     "patrol_active": self.patrol_active, "patrol_state": self.patrol_state,
                     "goal": list(self.goal) if self.goal else None,
                     "patrol_pts": [list(q) for q in self.patrol_pts] if self.patrol_active else [],
-                    "path": self.path, "log": self.last[-4:]}
+                    "path": self.path, "log": self.last[-4:],
+                    "nogo": self.nogo, "nogo_dirty": self.nogo != self.nogo_applied}

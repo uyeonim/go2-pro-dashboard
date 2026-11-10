@@ -1126,7 +1126,76 @@ def rslam_refresh_map():
         ok, res = _fetch_robot_file(name)
         if not ok:
             return jsonify({"ok": False, "error": res}), 502
+    rslam.on_fetched_pgm()
     return jsonify({"ok": rslam.load_map()})
+
+
+def _push_robot_file(name, data):
+    """로봇 지도 칸에 파일 올리기 (unitree_ui pushFile과 같은 방식: 30KB 조각마다 'ok' 확인)"""
+    import base64
+    conn, loop = state["conn"], state["loop"]
+    if conn is None or loop is None:
+        return False, "로봇이 연결돼 있지 않아요"
+    b64 = base64.b64encode(data).decode()
+    size = 30 * 1024
+    chunks = [b64[i:i + size] for i in range(0, len(b64), size)]
+
+    async def push():
+        ps = conn.datachannel.pub_sub
+        for g, ch in enumerate(chunks):
+            if g and g % 5 == 0:
+                await asyncio.sleep(0.5)
+            msg = {"req_type": "push_static_file", "req_uuid": f"upload_req_{int(time.time() * 1000) % 2**31}_{g}",
+                   "related_bussiness": "uslam_final_pcd", "file_md5": "null", "file_path": name,
+                   "file_size_after_b64": len(b64),
+                   "file": {"chunk_index": g + 1, "total_chunk_num": len(chunks), "chunk_data": ch,
+                            "chunk_data_size": len(ch)}}
+            ack = await asyncio.wait_for(ps.publish("", msg, "rtc_inner_req"), 10)
+            st = (ack.get("info") or {}).get("file_status")
+            if st != "ok":
+                raise RuntimeError(f"조각 {g + 1}/{len(chunks)} 실패 ({st})")
+        return True
+    try:
+        asyncio.run_coroutine_threadsafe(push(), loop).result(30 + 12 * len(chunks))
+    except Exception as e:
+        return False, f"올리기 실패: {e}"
+    log(f"📤 로봇에 올림: {name} ({len(data)} bytes, {len(chunks)}조각)")
+    return True, len(data)
+
+
+@app.route("/rslam/nogo", methods=["GET", "POST"])
+def rslam_nogo():
+    """가지 말 곳 목록 (지도 좌표 사각형). POST로 저장만 (로봇 적용은 /rslam/nogo/apply)"""
+    if request.method == "POST":
+        if not can_drive():
+            return jsonify({"ok": False, "error": "노트북 화면에서만 할 수 있어요"}), 403
+        rslam.save_nogo(zones=(request.get_json(force=True) or {}).get("zones", []))
+    return jsonify({"ok": True, "zones": rslam.nogo, "applied": rslam.nogo_applied})
+
+
+@app.route("/rslam/nogo/apply", methods=["POST"])
+def rslam_nogo_apply():
+    """가지 말 곳을 칠한 2D 지도를 로봇에 올리고 다시 불러오게 함"""
+    bad = _rslam_guard()
+    if bad:
+        return bad
+    if rslam.busy():
+        return jsonify({"ok": False, "error": "로봇이 이동 중이에요. 멈춘 뒤에 적용하세요"}), 409
+    data = rslam.edited_pgm()
+    ok, res = _push_robot_file("map.pgm", data)
+    if not ok:
+        return jsonify({"ok": False, "error": res}), 502
+    rslam.after_upload(data)
+    # 지도 다시 불러오기: 같은 id로 set_map_id → 다음 navigation/start 때 새 2D 지도로 길 찾음
+    _uslam_send("common/get_map_id")
+    for _ in range(20):
+        time.sleep(0.1)
+        if rslam.map_id:
+            break
+    if rslam.map_id and rslam.map_id != "none":
+        _uslam_send(f"common/set_map_id/{rslam.map_id}")
+    _uslam_send("navigation/stop")
+    return jsonify({"ok": True, "zones": len(rslam.nogo)})
 
 
 @app.route("/rslam/localize", methods=["POST"])
