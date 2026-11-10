@@ -29,6 +29,7 @@ from flask import Flask, Response, jsonify, redirect, request, send_from_directo
 
 from follow import Follower
 from mapstack import MapStack
+from robotslam import RobotSlam
 from navigator import Navigator
 from sensors import make_conn  # import 시 .env도 읽음
 from unitree_webrtc_connect import RTC_TOPIC, SPORT_CMD
@@ -256,11 +257,18 @@ uslam_log = []   # 로봇 내장 SLAM(uslam_server)의 응답·상태 문자열 
 
 
 def probe_msg(tp, m):
+    d = m.get("data") if isinstance(m, dict) else m
     if tp == "rt/uslam/server_log":
-        d = m.get("data") if isinstance(m, dict) else m
         txt = d.get("data") if isinstance(d, dict) else d
         uslam_log.append([time.strftime("%H:%M:%S"), str(txt)[:300]])
         del uslam_log[:-200]
+        rslam.on_log(txt)
+    elif tp == "rt/uslam/localization/odom" and isinstance(d, dict):
+        rslam.on_loc_odom(d)
+    elif tp == "rt/uslam/frontend/odom" and isinstance(d, dict):
+        rslam.on_map_odom(d)
+    elif tp == "rt/uslam/navigation/global_path" and isinstance(d, dict):
+        rslam.on_path(d)
     if tp == "rt/uslam/frontend/cloud_world_ds" and probe.get(tp, {}).get("n", 0) < 6:   # 분석용 샘플 몇 개 저장
         try:
             d = m["data"]
@@ -723,6 +731,8 @@ def nav_goto():
     j = request.get_json(force=True)
     yaw = j.get("yaw")
     follower.stop("클릭 이동")
+    if rslam.busy():
+        rslam.stop()
     nav.start([(float(j["x"]), float(j["y"]))], name="클릭 이동", speed=j.get("speed"), final_yaw=yaw)
     log(f"🎯 클릭 이동: ({j['x']:.2f}, {j['y']:.2f})" + (f" 방향 {math.degrees(yaw):.0f}°" if yaw is not None else ""))
     return jsonify({"ok": True})
@@ -745,6 +755,8 @@ def nav_teleop():
         nav.stop("방향키 조종", quiet=True)
     if follower.active:
         follower.stop("방향키 조종")
+    if rslam.busy():
+        rslam.stop()
     if vx == vy == vyaw == 0:
         teleop["active"] = False
         _sport_cmd("StopMove")
@@ -773,6 +785,8 @@ def nav_run():
         return jsonify({"ok": False, "error": "경로를 찾을 수 없어요"}), 404
     goals = _local_to_world(r["points"], _pose())     # 지금 로봇 자리·방향을 경로의 출발점으로
     follower.stop("경로 주행")
+    if rslam.busy():
+        rslam.stop()
     nav.start(goals, loops=j.get("loops", 1), name=r["name"], speed=j.get("speed"))
     log(f"▶ 경로 주행: {r['name']} ({len(goals)}개 지점, {j.get('loops', 1)}바퀴)")
     return jsonify({"ok": True})
@@ -782,6 +796,8 @@ def nav_run():
 def nav_stop():
     nav.stop("정지 버튼")      # 정지는 누구든 (공개 주소에서도) 누를 수 있게
     follower.stop("정지 버튼")
+    if rslam.busy():
+        rslam.stop()
     return jsonify({"ok": True})
 
 
@@ -797,6 +813,8 @@ def follow_action(action):
     j = request.get_json(silent=True) or {}
     if action == "start":
         nav.stop("따라가기 시작", quiet=True)
+        if rslam.busy():
+            rslam.stop()
         follower.start(dist_goal=j.get("dist"), heart=j.get("heart"), speed=j.get("speed"))
     elif action == "set":
         follower.set(dist_goal=j.get("dist"), heart=j.get("heart"), speed=j.get("speed"))
@@ -1056,16 +1074,108 @@ def uslam_cmd():
     cmd = str((request.get_json(silent=True) or {}).get("cmd", "")).strip()
     if not cmd.startswith(USLAM_SAFE) and not cmd.endswith("/get_status"):
         return jsonify({"ok": False, "error": "아직 허용하지 않은 명령이에요"}), 400
-    conn = state["conn"]
-    if conn is None or state["loop"] is None:
+    if not _uslam_send(cmd):
         return jsonify({"ok": False, "error": "로봇이 연결돼 있지 않아요"}), 409
-    state["loop"].call_soon_threadsafe(conn.datachannel.pub_sub.publish_without_callback, "rt/uslam/client_command", cmd)
-    uslam_log.append([time.strftime("%H:%M:%S"), f">> {cmd}"])
-    log(f"🗺 내장 SLAM 명령: {cmd}")
     return jsonify({"ok": True})
 
 
+def _uslam_send(cmd):
+    conn, loop = state["conn"], state["loop"]
+    if conn is None or loop is None:
+        return False
+    loop.call_soon_threadsafe(conn.datachannel.pub_sub.publish_without_callback, "rt/uslam/client_command", cmd)
+    uslam_log.append([time.strftime("%H:%M:%S"), f">> {cmd}"])
+    log(f"🗺 내장 SLAM 명령: {cmd}")
+    return True
+
+
 ROBOT_MAP_DIR = os.path.join(BASE, "maps", "robot")   # 로봇 내장 SLAM 지도(앱에서 딴 지도 등)를 내려받는 곳
+rslam = RobotSlam(send_cmd=_uslam_send, map_dir=ROBOT_MAP_DIR, log=log)
+
+
+def _rslam_guard():
+    bad = _drive_guard()
+    if bad:
+        return bad
+    if not rslam.meta:
+        return jsonify({"ok": False, "error": "로봇 지도를 먼저 받아 주세요"}), 409
+    return None
+
+
+def _xyyaw():
+    j = request.get_json(force=True)
+    return float(j["x"]), float(j["y"]), float(j.get("yaw") or 0.0), j
+
+
+@app.route("/rslam/map.png")
+def rslam_map_png():
+    if not rslam.png:
+        return "no map", 404
+    r = Response(rslam.png, mimetype="image/png")
+    r.headers["Cache-Control"] = "no-store"
+    return r
+
+
+@app.route("/rslam/refresh_map", methods=["POST"])
+def rslam_refresh_map():
+    """로봇에서 2D 지도(map.pgm, map.txt)를 새로 받아 화면용으로 준비"""
+    if not can_drive():
+        return jsonify({"ok": False, "error": "노트북 화면에서만 할 수 있어요"}), 403
+    for name in ("map.txt", "map.pgm"):
+        ok, res = _fetch_robot_file(name)
+        if not ok:
+            return jsonify({"ok": False, "error": res}), 502
+    return jsonify({"ok": rslam.load_map()})
+
+
+@app.route("/rslam/localize", methods=["POST"])
+def rslam_localize():
+    """지도 위 로봇 위치 알려주기 → 로봇 내장 위치 찾기 시작 (로봇은 안 움직임)"""
+    bad = _rslam_guard()
+    if bad:
+        return bad
+    x, y, yaw, _ = _xyyaw()
+    threading.Thread(target=rslam.localize, args=(x, y, yaw), daemon=True).start()
+    return jsonify({"ok": True})
+
+
+@app.route("/rslam/goto", methods=["POST"])
+def rslam_goto():
+    """로봇 내장 내비게이션으로 목표 지점 이동"""
+    bad = _rslam_guard()
+    if bad:
+        return bad
+    if not rslam.localized:
+        return jsonify({"ok": False, "error": "먼저 📍 위치 지정으로 로봇 위치를 찾아 주세요"}), 409
+    x, y, yaw, _ = _xyyaw()
+    nav.stop("로봇 내비게이션", quiet=True)
+    follower.stop("로봇 내비게이션")
+    threading.Thread(target=rslam.goto, args=(x, y, yaw), daemon=True).start()
+    return jsonify({"ok": True})
+
+
+@app.route("/rslam/patrol", methods=["POST"])
+def rslam_patrol():
+    """로봇 내장 순찰: 지점들을 차례로 (loops 바퀴, -1 = 계속)"""
+    bad = _rslam_guard()
+    if bad:
+        return bad
+    if not rslam.localized:
+        return jsonify({"ok": False, "error": "먼저 📍 위치 지정으로 로봇 위치를 찾아 주세요"}), 409
+    j = request.get_json(force=True)
+    pts = [(float(p[0]), float(p[1]), float(p[2])) for p in j.get("points", [])]
+    if len(pts) < 2:
+        return jsonify({"ok": False, "error": "순찰 지점을 2개 이상 찍어 주세요"}), 400
+    nav.stop("로봇 순찰", quiet=True)
+    follower.stop("로봇 순찰")
+    threading.Thread(target=rslam.patrol, args=(pts, int(j.get("loops", 1))), daemon=True).start()
+    return jsonify({"ok": True})
+
+
+@app.route("/rslam/stop", methods=["POST"])
+def rslam_stop():
+    rslam.stop()          # 정지는 누구든
+    return jsonify({"ok": True})
 
 
 @app.route("/uslam/fetch", methods=["POST"])
@@ -1076,23 +1186,54 @@ def uslam_fetch():
     name = str((request.get_json(silent=True) or {}).get("file", ""))
     if name not in ("map.pgm", "map.txt", "map.pcd"):
         return jsonify({"ok": False, "error": "map.pgm / map.txt / map.pcd 중 하나"}), 400
+    ok, res = _fetch_robot_file(name)
+    if not ok:
+        return jsonify({"ok": False, "error": res}), 502
+    return jsonify({"ok": True, "bytes": res})
+
+
+def _fetch_robot_file(name):
+    """로봇 지도 칸의 파일을 maps/robot/ 에 저장. (성공여부, 바이트수 또는 오류)"""
     conn, loop = state["conn"], state["loop"]
     if conn is None or loop is None:
-        return jsonify({"ok": False, "error": "로봇이 연결돼 있지 않아요"}), 409
+        return False, "로봇이 연결돼 있지 않아요"
     from unitree_webrtc_connect.msgs.rtc_inner_req import WebRTCDataChannelFileDownloader
     dl = WebRTCDataChannelFileDownloader(conn.datachannel.channel, conn.datachannel.pub_sub)
     fut = asyncio.run_coroutine_threadsafe(asyncio.wait_for(dl.download_file(name), 60), loop)
     try:
         data = fut.result(70)
     except Exception as e:
-        return jsonify({"ok": False, "error": f"내려받기 실패: {type(e).__name__}"}), 504
+        return False, f"내려받기 실패: {type(e).__name__}"
     if not isinstance(data, (bytes, bytearray)):
-        return jsonify({"ok": False, "error": f"내려받기 실패: {data}"}), 502
+        return False, f"내려받기 실패: {data}"
     os.makedirs(ROBOT_MAP_DIR, exist_ok=True)
     with open(os.path.join(ROBOT_MAP_DIR, name), "wb") as f:
         f.write(data)
     log(f"📥 로봇 지도 파일 받음: maps/robot/{name} ({len(data)} bytes)")
-    return jsonify({"ok": True, "bytes": len(data)})
+    return True, len(data)
+
+
+@app.route("/lidar/restart", methods=["POST"])
+def lidar_restart():
+    """LiDAR 끄고 다시 켜기 (앱에서 SLAM 지도를 딴 뒤 실시간 LiDAR가 안 올 때)"""
+    if not can_drive():
+        return jsonify({"ok": False, "error": "노트북 화면에서만 할 수 있어요"}), 403
+    conn, loop = state["conn"], state["loop"]
+    if conn is None or loop is None:
+        return jsonify({"ok": False, "error": "로봇이 연결돼 있지 않아요"}), 409
+
+    async def cycle():
+        ps = conn.datachannel.pub_sub
+        ps.publish_without_callback("rt/utlidar/switch", "off")
+        await asyncio.sleep(1.5)
+        ps.publish_without_callback("rt/utlidar/switch", "on")
+        await conn.datachannel.disableTrafficSaving(True)
+        ps.unsubscribe("rt/utlidar/voxel_map_compressed")
+        await asyncio.sleep(0.3)
+        ps.subscribe("rt/utlidar/voxel_map_compressed", lambda m: update_lidar(m["data"]["data"]["points"]))
+    asyncio.run_coroutine_threadsafe(cycle(), loop)
+    log("🔄 LiDAR 끄고 다시 켬")
+    return jsonify({"ok": True})
 
 
 @app.route("/uslam/log")
@@ -1125,7 +1266,7 @@ def data():
         "video_age": age(_latest_t[0]), "sport_age": age(state["sport_t"]),
         "lidar_age": age(state["lidar_t"]), "recording": recorder.status(),
         "obstacle_lidar": state["obstacle_lidar"],
-        "can_drive": can_drive(), "nav": nav.status(), "follow": follower.status(),
+        "can_drive": can_drive(), "nav": nav.status(), "follow": follower.status(), "rslam": rslam.status(),
         "uwb_buttons": (state["uwb"] or {}).get("buttons") if time.time() - state["uwb_t"] < 1 else None,
     }
     if s is not None:

@@ -161,6 +161,7 @@
     <section class="card" id="c-map">
       <h2>LiDAR · 위에서 본 지도 <span id="lidarinfo" class="sub"></span>
         <span class="acts">
+          <button class="btn hidden" id="b-rmap" title="로봇 내장 SLAM 지도(앱에서 딴 지도) 보기 · 위치 찾기 · 목표 이동 · 순찰">🗺 로봇 지도</button>
           <button class="btn hidden" id="b-follow" title="리모컨을 든 사람을 따라가요 (바라보면 하트)">🐕 따라가기</button>
           <button class="btn hidden" id="b-keys" title="켜면 키보드 방향키로 로봇을 조종해요">🎮 방향키</button>
           <button class="btn hidden" id="b-goto" title="켜고 지도를 클릭하면 로봇이 그곳으로 걸어가요">🎯 클릭 이동</button>
@@ -178,6 +179,22 @@
         <button class="btn" id="d-undo">되돌리기</button>
         <button class="btn" id="d-save">저장</button>
         <button class="btn" id="d-cancel">취소</button>
+      </div>
+      <div class="navbar hidden" id="rsbar">
+        <span class="msg" id="rsmsg"></span>
+        <button class="btn" id="rs-pose" title="지도에서 로봇이 지금 있는 곳을 누르고, 바라보는 방향으로 끌어요">📍 위치 지정</button>
+        <button class="btn" id="rs-goal" title="갈 곳을 누르고, 도착해서 바라볼 방향으로 끌어요 (로봇이 스스로 길 찾음)">🎯 목표 이동</button>
+        <button class="btn" id="rs-patrol" title="순찰 지점을 차례로 찍고 시작">🔁 순찰 만들기</button>
+        <button class="btn" id="rs-fetch" title="로봇에 저장된 지도를 다시 받아요 (앱에서 새로 땄을 때)">↻ 지도 받기</button>
+        <button class="btn stop hidden" id="rs-stop">⛔ 정지</button>
+      </div>
+      <div class="navbar hidden" id="rspbar">
+        <span class="msg" id="rspmsg"></span>
+        <label>바퀴 <input type="number" id="rsp-loops" min="1" max="50" value="1" style="width:46px"></label>
+        <label title="계속 반복 (정지 누를 때까지)"><input type="checkbox" id="rsp-forever"> 계속</label>
+        <button class="btn" id="rsp-undo">되돌리기</button>
+        <button class="btn" id="rsp-go">▶ 순찰 시작</button>
+        <button class="btn" id="rsp-cancel">취소</button>
       </div>
       <div class="navbar hidden" id="followbar">
         <span class="msg" id="followmsg"></span>
@@ -409,7 +426,8 @@ function render(){
   } else {
     pill('ok', D.demo ? '연결됨 (데모)' : '연결됨');
     freshness('ov-cam', D.video_age, '카메라 영상 기다리는 중', '영상');
-    freshness('ov-map', D.lidar_age, 'LiDAR 데이터 기다리는 중', 'LiDAR 데이터');
+    if(mapMode === 'robot') ov('ov-map', null);       // 로봇 지도 화면은 실시간 LiDAR와 무관
+    else freshness('ov-map', D.lidar_age, 'LiDAR 데이터 기다리는 중', 'LiDAR 데이터');
     freshness('ov-sen', D.sport_age, '센서 데이터 기다리는 중', '센서 데이터');
   }
   if(D.battery !== undefined && D.battery <= BATT_LOW)
@@ -619,6 +637,7 @@ function drawMap(L){
 let stack = {version: -1, cells: []};
 async function lidarTick(){
   if(mapVid){ $('lidarinfo').textContent = '로봇 녹화 영상'; return; }   // 데모 영상이 지도를 대신함
+  if(mapMode === 'robot'){ drawRobotMap(); $('lidarinfo').textContent = '로봇 내장 SLAM 지도'; return; }
   try{
     const L = await api.lidar();
     if(L.stack){                                          // 쌓은 지도: 바뀌었을 때만 새로 받음
@@ -709,17 +728,20 @@ function evWorld(ev){
   return {u, v, x: view.rx + (view.H/2 - v) / view.s, y: view.ry + (view.W/2 - u) / view.s};
 }
 cv.addEventListener('pointerdown', ev => {
+  if(mapMode === 'robot') return rsDown(ev);
   if(!pickMode || !view) return;
   press = {...evWorld(ev), yaw: null};
   cv.setPointerCapture(ev.pointerId);
 });
 cv.addEventListener('pointermove', ev => {
+  if(mapMode === 'robot') return rsMove(ev);
   if(!press || pickMode !== 'goto') return;
   const w = evWorld(ev);
   press.yaw = Math.hypot(w.u - press.u, w.v - press.v) > 12 ? Math.atan2(w.y - press.y, w.x - press.x) : null;
   if(lastL) drawMap(lastL);
 });
 cv.addEventListener('pointerup', async ev => {
+  if(mapMode === 'robot') return rsUp(ev);
   if(!press) return;
   const p = press; press = null;
   if(pickMode === 'goto'){
@@ -743,11 +765,141 @@ function drawArrow(P, x, y, yaw, color){
 }
 cv.addEventListener('wheel', ev => {
   ev.preventDefault();
-  RANGE = Math.max(1.5, Math.min(15, RANGE * (ev.deltaY > 0 ? 1.15 : 1/1.15)));
-  if(lastL) drawMap(lastL);
+  RANGE = Math.max(1.5, Math.min(25, RANGE * (ev.deltaY > 0 ? 1.15 : 1/1.15)));
+  redrawMap();
 }, {passive:false});
-$('z-in').onclick = () => { RANGE = Math.max(1.5, RANGE/1.3); if(lastL) drawMap(lastL); };
-$('z-out').onclick = () => { RANGE = Math.min(15, RANGE*1.3); if(lastL) drawMap(lastL); };
+$('z-in').onclick = () => { RANGE = Math.max(1.5, RANGE/1.3); redrawMap(); };
+$('z-out').onclick = () => { RANGE = Math.min(25, RANGE*1.3); redrawMap(); };
+function redrawMap(){ if(mapMode === 'robot') drawRobotMap(); else if(lastL) drawMap(lastL); }
+
+// ── 로봇 내장 SLAM 지도 화면: 위치 지정 · 목표 이동 · 순찰 ──
+let mapMode = 'lidar';         // 'lidar' (우리 실시간 지도) | 'robot' (로봇 내장 SLAM 지도)
+let rsPick = null;             // null | 'pose' | 'goal' | 'patrol'
+let rsPress = null, rsDraft = [], rview = null, rsCenter = null;
+const rmapImg = new Image(); let rmapT = null;
+const RS = () => (D && D.rslam) || {};
+function rsWorld(ev){
+  const r = cv.getBoundingClientRect();
+  const u = (ev.clientX - r.left) * cv.width / r.width, v = (ev.clientY - r.top) * cv.height / r.height;
+  return {u, v, x: rview.cx + (rview.H/2 - v) / rview.s, y: rview.cy + (rview.W/2 - u) / rview.s};
+}
+function rsDown(ev){
+  if(!rsPick || !rview) return;
+  rsPress = {...rsWorld(ev), yaw: null}; cv.setPointerCapture(ev.pointerId);
+}
+function rsMove(ev){
+  if(!rsPress) return;
+  const w = rsWorld(ev);
+  rsPress.yaw = Math.hypot(w.u - rsPress.u, w.v - rsPress.v) > 12 ? Math.atan2(w.y - rsPress.y, w.x - rsPress.x) : null;
+  drawRobotMap();
+}
+async function rsUp(ev){
+  if(!rsPress) return;
+  const p = rsPress; rsPress = null;
+  const yaw = p.yaw === null ? 0 : p.yaw;
+  if(rsPick === 'pose'){
+    if(p.yaw === null){ toast('로봇이 바라보는 방향으로 끌어 주세요'); return drawRobotMap(); }
+    const j = await api.post('/rslam/localize', {x: p.x, y: p.y, yaw});
+    toast(j.ok ? '위치 찾는 중… (잠시 뒤 지도에 로봇이 나타나요)' : j.error); rsSetPick(null);
+  } else if(rsPick === 'goal'){
+    const j = await api.post('/rslam/goto', {x: p.x, y: p.y, yaw: p.yaw === null ? null : yaw});
+    toast(j.ok ? '로봇이 스스로 길을 찾아 가요 — 멈추려면 ⛔ 정지 (Esc)' : j.error);
+    if(j.ok) rsSetPick(null);
+  } else if(rsPick === 'patrol'){
+    rsDraft.push([p.x, p.y, yaw]); renderRs();
+  }
+  drawRobotMap();
+}
+function rsSetPick(m){
+  rsPick = m;
+  $('rs-pose').classList.toggle('on', m === 'pose');
+  $('rs-goal').classList.toggle('on', m === 'goal');
+  $('rs-patrol').classList.toggle('on', m === 'patrol');
+  document.querySelector('.mapwrap').classList.toggle('pick', !!m);
+  const hint = {pose: '로봇이 있는 곳을 누르고 → 로봇이 보는 방향으로 끌어서 놓기',
+                goal: '갈 곳 누르기 (끌면 도착 후 바라볼 방향)', patrol: '순찰 지점을 차례로 (끌면 그 지점에서 바라볼 방향)'}[m];
+  $('maphint').classList.toggle('hidden', !hint); if(hint) $('maphint').textContent = hint;
+  if(m !== 'patrol') rsDraft = rsDraft;   // 유지
+  renderRs(); drawRobotMap();
+}
+$('b-rmap').onclick = () => {
+  mapMode = mapMode === 'robot' ? 'lidar' : 'robot';
+  setPick(null); rsSetPick(null);
+  if(mapMode === 'robot'){ RANGE = Math.max(RANGE, 8); rsCenter = null; } else RANGE = 4;
+  renderRs(); redrawMap();
+};
+$('rs-pose').onclick = () => rsSetPick(rsPick === 'pose' ? null : 'pose');
+$('rs-goal').onclick = () => rsSetPick(rsPick === 'goal' ? null : 'goal');
+$('rs-patrol').onclick = () => { rsDraft = []; rsSetPick(rsPick === 'patrol' ? null : 'patrol'); };
+$('rs-fetch').onclick = async () => {
+  toast('로봇에서 지도를 받는 중… (몇 초)');
+  const j = await api.post('/rslam/refresh_map');
+  toast(j.ok ? '로봇 지도를 받았어요' : (j.error || '지도를 받지 못했어요'));
+};
+$('rs-stop').onclick = () => api.post('/rslam/stop');
+$('rsp-undo').onclick = () => { rsDraft.pop(); renderRs(); drawRobotMap(); };
+$('rsp-cancel').onclick = () => { rsDraft = []; rsSetPick(null); };
+$('rsp-go').onclick = async () => {
+  const loops = $('rsp-forever').checked ? -1 : Math.max(1, parseInt($('rsp-loops').value) || 1);
+  if(!confirm(`로봇이 ${rsDraft.length}개 지점을 ${loops < 0 ? '계속' : loops + '바퀴'} 순찰해요.\n주변을 비우고 리모컨 비상정지(L2+B)를 준비하세요.`)) return;
+  const j = await api.post('/rslam/patrol', {points: rsDraft, loops});
+  toast(j.ok ? '순찰을 시작해요 — 멈추려면 ⛔ 정지 (Esc)' : j.error);
+  if(j.ok){ rsSetPick(null); }
+};
+function renderRs(){
+  const on = mapMode === 'robot', s = RS();
+  $('b-rmap').classList.toggle('hidden', !(D && D.can_drive && s.has_map));
+  $('b-rmap').classList.toggle('on', on);
+  $('b-rmap').textContent = on ? '🗺 로봇 지도 · 실시간으로' : '🗺 로봇 지도';
+  ['b-keys','b-goto','b-draft','b-trail'].forEach(id => $(id).classList.toggle('hidden', on || (id !== 'b-trail' && !(D && D.can_drive))));
+  $('rsbar').classList.toggle('hidden', !on);
+  $('rspbar').classList.toggle('hidden', !(on && rsPick === 'patrol'));
+  if(!on) return;
+  const moving = s.nav_active || s.patrol_active;
+  $('rs-stop').classList.toggle('hidden', !moving);
+  $('rs-goal').disabled = $('rs-patrol').disabled = !s.localized;
+  const st = s.patrol_active ? `순찰 중 ${s.patrol_state || ''}` : s.nav_active ? `이동 ${s.nav_state || '준비'}` : '';
+  const loc = s.localized ? '✅ 위치 찾음' : (s.mapping ? '🛠 로봇이 지도 만드는 중' : '❓ 위치 모름 → 📍 위치 지정');
+  const last = (s.log || []).slice(-1)[0];
+  $('rsmsg').textContent = `${loc}${st ? ' · ' + st : ''}${last ? ' · ' + last[1].slice(0, 60) : ''}`;
+  $('rspmsg').textContent = `순찰 지점 ${rsDraft.length}개 (2개 이상)`;
+  $('rsp-go').disabled = rsDraft.length < 2;
+}
+function drawRobotMap(){
+  const W = cv.width, H = cv.height, s = Math.min(W, H) / (2*RANGE), R = RS();
+  cx.setTransform(1,0,0,1,0,0);
+  cx.fillStyle = '#0a0d12'; cx.fillRect(0,0,W,H);
+  if(!R.has_map){ cx.fillStyle = '#8b97a7'; cx.font = '15px Malgun Gothic, sans-serif'; cx.textAlign = 'center';
+    cx.fillText('로봇 지도가 없어요 — ↻ 지도 받기', W/2, H/2); return; }
+  const m = R.map, pose = R.pose || R.map_pose;
+  if(rmapT !== m.t){ rmapT = m.t; rmapImg.src = '/rslam/map.png?t=' + m.t; rmapImg.onload = drawRobotMap; }
+  if(!rsCenter || (pose && !rsPick)) rsCenter = pose ? [pose[0], pose[1]] : [0, 0];
+  const [ccx, ccy] = rsCenter;
+  rview = {cx: ccx, cy: ccy, s, W, H};
+  const P = (x,y) => [W/2 - (y-ccy)*s, H/2 - (x-ccx)*s];
+  if(rmapImg.complete && rmapImg.naturalWidth){        // 지도 그림 (ROS 방식: 첫 줄 = y 최대)
+    cx.save(); cx.imageSmoothingEnabled = false;
+    cx.setTransform(0, -m.res*s, m.res*s, 0, W/2 - (m.oy + m.h*m.res - ccy)*s, H/2 - (m.ox - ccx)*s);
+    cx.drawImage(rmapImg, 0, 0); cx.restore();
+  }
+  cx.strokeStyle = 'rgba(255,255,255,.05)'; cx.lineWidth = 1;           // 1m 격자
+  for(let k = Math.floor(ccx - RANGE*1.7); k <= ccx + RANGE*1.7; k++){ const [,v] = P(k, ccy); cx.beginPath(); cx.moveTo(0,v); cx.lineTo(W,v); cx.stroke(); }
+  for(let k = Math.floor(ccy - RANGE*2.7); k <= ccy + RANGE*2.7; k++){ const [u] = P(ccx, k); cx.beginPath(); cx.moveTo(u,0); cx.lineTo(u,H); cx.stroke(); }
+  const [u0, v0] = P(0, 0);                                                // 지도 만든 출발점
+  cx.strokeStyle = 'rgba(255,176,32,.8)'; cx.lineWidth = 2; cx.beginPath(); cx.arc(u0, v0, 7, 0, Math.PI*2); cx.stroke();
+  if(R.path && R.path.length > 1) drawLine(P, R.path, 'rgba(57,217,138,.95)', 3);
+  const pts = rsPick === 'patrol' ? rsDraft : (R.patrol_pts || []);
+  if(pts.length){ drawLine(P, [...pts.map(p => [p[0], p[1]]), ...(pts.length > 2 ? [[pts[0][0], pts[0][1]]] : [])], 'rgba(190,140,255,.8)', 2, [6,5]);
+    drawDots(P, pts.map(p => [p[0], p[1]]), '#be8cff', true); }
+  if(R.goal){ drawDots(P, [[R.goal[0], R.goal[1]]], '#39d98a', false); drawArrow(P, R.goal[0], R.goal[1], R.goal[2], '#39d98a'); }
+  if(rsPress){ drawDots(P, [[rsPress.x, rsPress.y]], '#fff', false); if(rsPress.yaw !== null) drawArrow(P, rsPress.x, rsPress.y, rsPress.yaw, '#fff'); }
+  if(pose){                                                                // 로봇 (내장 SLAM 위치)
+    const [u, v] = P(pose[0], pose[1]);
+    cx.save(); cx.translate(u, v); cx.rotate(-pose[2]);
+    cx.fillStyle = R.localized ? '#39d98a' : '#ffb020';
+    cx.beginPath(); cx.moveTo(0,-14); cx.lineTo(9,10); cx.lineTo(-9,10); cx.closePath(); cx.fill(); cx.restore();
+  }
+}
 
 function setPick(mode){
   if(pickMode === 'keys' && mode !== 'keys') keysRelease();
@@ -920,7 +1072,8 @@ document.addEventListener('keydown', ev => {
   if(pickMode === 'keys' && (ARROWS.includes(ev.key) || ev.key === 'Shift') && !/INPUT|TEXTAREA|SELECT/.test(ev.target.tagName)){
     ev.preventDefault(); held.add(ev.key); return;          // 페이지 스크롤 대신 로봇 조종
   }
-  if((ev.key === 'Escape' || ev.key === ' ') && D && ((D.nav && D.nav.active) || (D.follow && D.follow.active))
+  if((ev.key === 'Escape' || ev.key === ' ') && D && ((D.nav && D.nav.active) || (D.follow && D.follow.active)
+     || (D.rslam && (D.rslam.nav_active || D.rslam.patrol_active)))
      && !/INPUT|TEXTAREA|SELECT/.test(ev.target.tagName)){
     ev.preventDefault(); navStop();
   } else if(ev.key === 'Escape'){ if(draft) $('d-cancel').click(); else setPick(null); }
@@ -945,6 +1098,7 @@ function renderNav(){
   $('b-navok').classList.toggle('hidden', !!n.active);
   if(wasActive !== !!n.active){ wasActive = !!n.active; renderRoutes(); }
   renderFollow();
+  renderRs();
 }
 
 // ── 고정 주소 입구: 노트북의 실제 대시보드가 켜져 있으면 그리로 이동 ──
