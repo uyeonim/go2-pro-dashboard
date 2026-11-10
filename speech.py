@@ -1,12 +1,15 @@
-"""로봇이 말하기: 글자 → 한국어 음성 wav (윈도우 내장 TTS, 무료) → 로봇 스피커(메가폰)로 재생.
+"""로봇이 말하기: 글자 → 한국어 음성 wav → 로봇 스피커(메가폰)로 재생.
 
-윈도우 '설정 > 시간 및 언어 > 음성'에 한국어 음성(Microsoft Heami)이 있어야 해요.
+목소리: Edge 신경망 음성 'ko-KR-InJoonNeural'(남, 무료·키 없음, 인터넷 필요, edge-tts 패키지) → ffmpeg로 16kHz wav.
+인터넷이 안 되거나 막히면 윈도우 내장 한국어 음성(Microsoft Heami)으로 자동 대체.
 로봇 쪽은 unitree 앱의 메가폰과 같은 방식: ENTER_MEGAPHONE → wav 조각 올리기(UPLOAD_MEGAPHONE) → 다 재생되면 EXIT.
 """
 import asyncio
 import base64
+import glob
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import wave
@@ -14,6 +17,15 @@ import wave
 RATE = 16000             # 작게 만들어야 빨리 올라감 (16kHz 16bit 모노 ≈ 32KB/초)
 CHUNK = 16384            # base64 글자 수 (라이브러리는 4096 — 크게 보내면 조각 수가 줄어 빨라짐)
 MAX_CHARS = 200
+VOICE = "ko-KR-InJoonNeural"
+
+
+def _ffmpeg():
+    exe = shutil.which("ffmpeg")
+    if exe:
+        return exe
+    hits = glob.glob(os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg*\*\bin\ffmpeg.exe"))
+    return hits[0] if hits else None
 
 _PS = r"""
 Add-Type -AssemblyName System.Speech
@@ -28,11 +40,38 @@ $s.Dispose()
 """ % RATE
 
 
-def tts_wav(text):
-    """글자 → wav 바이트, 길이(초)"""
+def _edge_wav(text, d):
+    import edge_tts
+    mp3, out = os.path.join(d, "e.mp3"), os.path.join(d, "e.wav")
+    asyncio.run(asyncio.wait_for(edge_tts.Communicate(text, VOICE).save(mp3), 10))
+    ff = _ffmpeg()
+    if not ff:
+        raise RuntimeError("ffmpeg 없음")
+    subprocess.run([ff, "-y", "-loglevel", "error", "-i", mp3, "-ar", str(RATE), "-ac", "1", "-sample_fmt", "s16", out],
+                   check=True, timeout=20, capture_output=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    return out
+
+
+def tts_wav(text, log=print):
+    """글자 → wav 바이트, 길이(초). Edge 음성이 안 되면 윈도우 음성."""
     text = " ".join(str(text).split())[:MAX_CHARS]
     if not text:
         raise ValueError("말할 내용이 없어요")
+    d = tempfile.mkdtemp(prefix="tts_")
+    try:
+        out = _edge_wav(text, d)
+        with open(out, "rb") as f:
+            data = f.read()
+        with wave.open(out) as w:
+            return data, w.getnframes() / w.getframerate()
+    except Exception as e:
+        log(f"🗣 Edge 음성 실패 → 윈도우 음성으로: {e!r}")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    return _windows_wav(text)
+
+
+def _windows_wav(text):
     d = tempfile.mkdtemp(prefix="tts_")
     src, out = os.path.join(d, "in.txt"), os.path.join(d, "out.wav")
     try:

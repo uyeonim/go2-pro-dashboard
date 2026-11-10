@@ -3,7 +3,7 @@
 "문 앞에 갔다가 하트하고 돌아와" → Claude가 아래 도구 중에서 골라 순서대로 부르고, 우리 코드가 실행.
 허용한 도구만 실행되므로 안전장치(속도 제한·정지 버튼·리모컨 비상정지)는 그대로.
 
-도구: get_status, say, list_places, save_place, go_to_place, move_relative, do_action, look, follow_me, patrol_places, stop
+도구: get_status, time_weather, say, list_places, save_place, go_to_place, move_relative, do_action, look, follow_me, patrol_places, stop
 장소는 로봇 내장 SLAM 지도 좌표로 maps/robot/places.json 에 저장 (go_to_place는 내장 내비게이션 사용).
 API 키: .env 의 ANTHROPIC_API_KEY (sensors.load_env가 읽음).
 """
@@ -13,6 +13,7 @@ import math
 import os
 import threading
 import time
+import urllib.request
 
 import anthropic
 
@@ -33,10 +34,13 @@ SYSTEM = """너는 연구실의 Unitree Go2 로봇개를 조종하는 비서야.
 - 사람이 위험하다고 하거나 "멈춰/그만"이라고 하면 바로 stop.
 - 카메라로 봐야 답할 수 있는 질문이면 look을 써.
 - "~라고 말해", "인사해 봐(말로)", "소개해 봐"처럼 로봇이 소리 내서 말해야 하면 say를 써. 짧고 자연스러운 한국어 한두 문장으로.
+- 시간·날짜·날씨를 물으면 time_weather로 확인하고 답해 (지어내지 말기). 숫자는 말하기 좋게 (예: 오후 3시 20분, 영상 12도).
 - 확실하지 않은 큰 이동은 하지 말고 한 번 물어봐."""
 
 TOOLS = [
     {"name": "get_status", "description": "로봇 상태: 배터리, 위치(지도 좌표), 위치를 찾았는지, 지금 하는 일.",
+     "input_schema": {"type": "object", "properties": {}, "additionalProperties": False}},
+    {"name": "time_weather", "description": "지금 날짜·시각·요일과 현재 날씨(하늘, 기온, 체감, 오늘 최고/최저, 비 올 확률).",
      "input_schema": {"type": "object", "properties": {}, "additionalProperties": False}},
     {"name": "say", "description": "로봇 스피커로 소리 내서 말하기 (한국어, 200자 이하). 다 말할 때까지 기다림.",
      "input_schema": {"type": "object", "properties": {"text": {"type": "string"}},
@@ -72,6 +76,35 @@ for _t in TOOLS:
     _t["strict"] = True
 
 
+# 날씨: Open-Meteo (무료, 키 없음). 위치는 .env 의 WEATHER_LAT / WEATHER_LON / WEATHER_PLACE (기본: 서울)
+WMO = {0: "맑음", 1: "대체로 맑음", 2: "구름 조금", 3: "흐림", 45: "안개", 48: "안개", 51: "약한 이슬비", 53: "이슬비",
+       55: "강한 이슬비", 61: "약한 비", 63: "비", 65: "강한 비", 66: "어는 비", 67: "어는 비", 71: "약한 눈", 73: "눈",
+       75: "많은 눈", 77: "싸락눈", 80: "소나기", 81: "소나기", 82: "강한 소나기", 85: "눈 소나기", 86: "강한 눈 소나기",
+       95: "뇌우", 96: "우박 동반 뇌우", 99: "우박 동반 뇌우"}
+DAYS = "월화수목금토일"
+
+
+def time_weather():
+    now = time.localtime()
+    out = {"now": time.strftime("%Y-%m-%d %H:%M", now) + f" ({DAYS[now.tm_wday]}요일)"}
+    lat, lon = os.environ.get("WEATHER_LAT", "37.5665"), os.environ.get("WEATHER_LON", "126.9780")
+    out["place"] = os.environ.get("WEATHER_PLACE", "서울")
+    url = (f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&timezone=Asia%2FSeoul&forecast_days=1"
+           "&current=temperature_2m,apparent_temperature,relative_humidity_2m,precipitation,weather_code,wind_speed_10m"
+           "&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max")
+    try:
+        with urllib.request.urlopen(url, timeout=5) as r:
+            w = json.load(r)
+        c, d = w["current"], w["daily"]
+        out["weather"] = {"sky": WMO.get(c["weather_code"], str(c["weather_code"])), "temp_c": c["temperature_2m"],
+                          "feels_like_c": c["apparent_temperature"], "humidity_pct": c["relative_humidity_2m"],
+                          "wind_kmh": c["wind_speed_10m"], "today_max_c": d["temperature_2m_max"][0],
+                          "today_min_c": d["temperature_2m_min"][0], "rain_chance_pct": d["precipitation_probability_max"][0]}
+    except Exception as e:
+        out["weather"] = f"날씨를 못 가져왔어요 ({e.__class__.__name__})"
+    return out
+
+
 class RobotAgent:
     def __init__(self, robot, places_file, log=print):
         """robot: 대시보드가 넘겨주는 함수 모음 (dict) — status, pose_map, goto_map, rslam_state, nav_relative,
@@ -102,6 +135,8 @@ class RobotAgent:
         R = self.robot
         if name == "get_status":
             return json.dumps(R["status"](), ensure_ascii=False)
+        if name == "time_weather":
+            return json.dumps(time_weather(), ensure_ascii=False)
         if name == "say":
             err = R["say"](a["text"])
             return f"실패: {err}" if err else "말했어요."

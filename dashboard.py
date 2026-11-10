@@ -1338,7 +1338,7 @@ def robot_say(text):
         return "아직 이전 말을 하는 중이에요"
     try:
         try:
-            wav, sec = speech.tts_wav(text)
+            wav, sec = speech.tts_wav(text, log=log)
         except Exception as e:
             return f"음성 만들기 실패: {e}"
         if state["demo"]:
