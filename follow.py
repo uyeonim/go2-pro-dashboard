@@ -124,8 +124,13 @@ class FaceWatch:
 
 class Follower:
     def __init__(self, get_pose, get_live_obstacles, get_jpeg, send_move, send_stop, send_action, log=print,
-                 get_obstacles=None):
+                 get_obstacles=None, robot_nav=None):
         self.get_pose, self.get_live = get_pose, get_live_obstacles
+        # robot_nav: 로봇 내장 SLAM(robotslam.RobotSlam). 위치를 찾은 상태면 로봇 지도 길찾기로 따라감
+        self.rnav = robot_nav
+        self._goal_sent, self._goal_t = None, 0.0
+        self.resting = False      # "엎드려" 뒤: "일어나" 할 때까지 따라가기 멈춤
+        self.mode = ""            # "map"(로봇 지도 길찾기) / "direct"(직접)
         self.get_obstacles = get_obstacles or get_live_obstacles   # 길 찾기용 (지금 보이는 점 + 쌓은 지도)
         self._plan, self._plan_t = None, 0.0
         self._last_vx = 0.0
@@ -176,7 +181,8 @@ class Follower:
             return {"active": self.active, "msg": self.msg, "dist_goal": self.dist_goal, "heart": self.heart,
                     "speed": self.speed, "plan": [list(q) for q in self._plan] if self._plan else None,
                     "remote": [round(r[0], 2), round(r[1], 3)] if fresh else None,
-                    "face": self.face_seen, "actions": self.actions, "has_face_model": self.face.det is not None}
+                    "face": self.face_seen, "actions": self.actions, "has_face_model": self.face.det is not None,
+                    "mode": self.mode, "resting": self.resting}
 
     def start(self, dist_goal=None, heart=None, speed=None):
         with self.lock:
@@ -208,10 +214,37 @@ class Follower:
         self._stop.set()
         with self.lock:
             self.active = False
+            self.resting = False
             self.msg = f"멈춤 ({why})" if was else self.msg
         if was:
+            self._stop_map_nav()
             self.send_stop()
             self.log(f"⏹ 따라가기 정지: {why}")
+
+    def _stop_map_nav(self):
+        if self.rnav is not None and self._goal_sent is not None:
+            self.rnav.stop()
+        self._goal_sent = None
+
+    def perform(self, sport_name, kind):
+        """따라가는 중에 동작하기: 멈추고 → 동작 → (엎드려가 아니면) 다시 따라가기.
+        kind: 'act' 보통 동작 / 'rest' 엎드리기(일어나 할 때까지 쉼) / 'wake' 일어나서 다시 따라가기"""
+        self._stop_map_nav()
+        self.send_stop()
+        time.sleep(0.25)
+        self.send_action(sport_name)
+        now = time.time()
+        if kind == "rest":
+            self.resting = True
+            self.msg = "엎드려 쉬는 중 — '일어나' 하면 다시 따라가요"
+        elif kind == "wake":
+            time.sleep(1.5)
+            self.send_action("BalanceStand")      # 일어선 뒤 걸을 수 있는 상태로
+            self.resting = False
+            self.action_until = time.time() + 1.0
+        else:
+            self.action_until = now + ACTION_TIME
+            self.last_action = now
 
     # ── 따라가기 ──
     def _run(self):
@@ -219,15 +252,19 @@ class Follower:
             while not self._stop.is_set():
                 time.sleep(0.1)
                 now = time.time()
-                if now < self.action_until:          # 하트/인사 하는 중 → 이동 명령 안 보냄
+                if now < self.action_until or self.resting:   # 동작 중 / 엎드려 쉬는 중 → 이동 명령 안 보냄
                     continue
                 r = self.remote()
                 p = self.get_pose()
                 if r is None or now - r[2] > STALE:
+                    self._stop_map_nav()
                     self.send_stop()
                     with self.lock:
                         self.msg = "리모컨 신호가 없어요 — 리모컨을 켜고 로봇 근처에서 들어 주세요"
                     continue
+                if self._map_follow(r, now):              # 로봇 지도 위치를 알면 로봇 내장 길찾기로
+                    continue
+                self.mode = "direct"
                 dist, b, _ = r
                 # UWB 거리는 약 0.4초 늦게 옴 → 그동안 우리가 앞으로 간 만큼 빼서 예측 (지나치게 다가가는 것 방지)
                 dist = dist - 0.4 * self._last_vx
@@ -274,6 +311,39 @@ class Follower:
                 self.active = False
                 self.msg = f"오류로 멈춤: {type(e).__name__}: {e}"
             self.log(self.msg)
+
+    def _map_follow(self, r, now):
+        """로봇 내장 SLAM 위치를 알면: 사람 앞 지점을 목표로 로봇 내비게이션에 계속 새로 보냄. 처리했으면 True."""
+        rn = self.rnav
+        mp = rn.pose if rn is not None else None
+        if rn is None or not rn.localized or not mp or now - mp[3] > 1.5:
+            if self._goal_sent is not None:
+                self._stop_map_nav()
+            return False
+        self.mode = "map"
+        dist, b, _ = r
+        x, y, yaw = mp[:3]
+        px, py = x + dist * math.cos(yaw + b), y + dist * math.sin(yaw + b)      # 사람(리모컨) 위치 (지도 좌표)
+        if dist < self.dist_goal + 0.3:                                          # 가까움 → 멈추고 사람 쪽 보기
+            if self._goal_sent is not None:
+                self._stop_map_nav()
+            vyaw = clip(1.2 * b, -MAX_W, MAX_W) if abs(b) > 0.35 else 0.0
+            if vyaw:
+                self.send_move(0.0, vyaw)
+            else:
+                self.send_stop()
+            self.msg = f"옆에 있어요 (로봇 지도) · 리모컨 {dist:.1f}m, {math.degrees(b):+.0f}°"
+            return True
+        ux, uy = (px - x) / dist, (py - y) / dist
+        gx, gy = px - ux * self.dist_goal, py - uy * self.dist_goal
+        gyaw = math.atan2(py - gy, px - gx)
+        moved = self._goal_sent is None or math.hypot(gx - self._goal_sent[0], gy - self._goal_sent[1]) > 0.5
+        if moved and now - self._goal_t > 1.0 or (self._goal_sent is not None and now - self._goal_t > 4.0):
+            self._goal_sent, self._goal_t = (gx, gy), now
+            rn.goto(gx, gy, gyaw)                        # 로봇이 지도·장애물 보고 스스로 길 찾음
+        st = rn.nav_state or "준비"
+        self.msg = f"로봇 지도로 따라가는 중 ({st}) · 리모컨 {dist:.1f}m, {math.degrees(b):+.0f}°"
+        return True
 
     def _detour(self, p, dist, b, now):
         """로봇→사람 직선이 막혔으면 돌아가는 길의 다음 점(지도 좌표), 안 막혔으면 None."""
@@ -342,11 +412,7 @@ class Follower:
                 self.look_since = now
             if now - self.look_since >= LOOK_HOLD and now - self.last_action > COOLDOWN:
                 act = "FingerHeart" if self.actions % 2 == 0 else "Hello"
-                self.send_stop()
-                time.sleep(0.2)
-                self.send_action(act)
+                self.perform(act, "act")              # 로봇 지도 길찾기 중이면 그것도 멈추고
                 self.actions += 1
-                self.last_action = now
-                self.action_until = now + ACTION_TIME
                 self.look_since = None
                 self.log(f"💗 바라봐서 {'하트' if act == 'FingerHeart' else '인사'}!")

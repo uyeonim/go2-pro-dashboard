@@ -1094,6 +1094,7 @@ def _uslam_send(cmd):
 
 ROBOT_MAP_DIR = os.path.join(BASE, "maps", "robot")   # 로봇 내장 SLAM 지도(앱에서 딴 지도 등)를 내려받는 곳
 rslam = RobotSlam(send_cmd=_uslam_send, map_dir=ROBOT_MAP_DIR, log=log)
+follower.rnav = rslam      # 로봇 지도 위치를 알면 따라가기도 로봇 내장 길찾기로
 
 
 def _rslam_guard():
@@ -1354,9 +1355,16 @@ def direct_action():
         return jsonify({"ok": False, "error": "허용하지 않은 동작이에요"}), 400
     if not state["connected"]:
         return jsonify({"ok": False, "error": "로봇이 연결돼 있지 않아요"}), 409
-    if nav.active or follower.active or rslam.busy() or agent.busy:
+    if follower.active:      # 따라가는 중: 멈추고 → 동작 → 다시 따라가기 (엎드려는 '일어나' 할 때까지 쉼)
+        kind = {"lie_down": "rest", "stand_up": "wake"}.get(name, "act")
+        threading.Thread(target=follower.perform, args=(KEYWORD_ACTIONS[name], kind), daemon=True).start()
+        log(f"👂 따라가는 중 단어 동작: {name}")
+        return jsonify({"ok": True, "during_follow": True})
+    if nav.active or rslam.busy() or agent.busy:
         return jsonify({"ok": False, "error": "로봇이 다른 일을 하는 중이에요"}), 409
     _sport_cmd(KEYWORD_ACTIONS[name])
+    if name == "stand_up":   # 일어선 뒤 걸을 수 있는 상태로
+        threading.Timer(1.5, lambda: _sport_cmd("BalanceStand")).start()
     log(f"👂 단어 동작: {name}")
     return jsonify({"ok": True})
 
