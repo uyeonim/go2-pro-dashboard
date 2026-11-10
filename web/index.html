@@ -144,12 +144,19 @@
   .aginput input{flex:1;min-width:0;font:inherit;font-size:13px;padding:7px 10px;border-radius:8px;border:1px solid var(--line);
                  background:var(--bg);color:var(--text)}
   .btn.listening{background:var(--bad);border-color:var(--bad);color:#fff}
+  .clock{margin-left:auto;font:700 18px Consolas,monospace;font-variant-numeric:tabular-nums;color:#cfe0ff;
+         background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:3px 10px;letter-spacing:.5px}
+  .clock + .btn{margin-right:4px}
+  header #pill{margin-left:0}
+  #flash{position:fixed;inset:0;background:#fff;opacity:0;pointer-events:none;z-index:99;transition:opacity .25s}
 </style>
 </head>
 <body>
 <header>
   <h1>Unitree Go2 · 실시간 대시보드</h1>
   <span id="demotag" class="demo-tag hidden">DEMO · 가짜 데이터</span>
+  <span id="clock" class="clock" title="녹화용 시계 (초 단위)"></span>
+  <button class="btn" id="b-sync" title="삐-삐-삐 소리 + 화면 번쩍: 폰 영상과 화면 녹화를 나중에 자동으로 맞출 때 씀">🎬 싱크</button>
   <span id="pill" class="busy"><span class="ic"></span><span id="pilltext">시작 중…</span></span>
 </header>
 <div id="modebar" class="hidden">
@@ -314,6 +321,7 @@
 
 <footer>로봇은 한 번에 하나만 연결돼요 (폰 앱은 꺼 두세요) · 영상 mp4는 내려받아서 재생하세요</footer>
 <div id="toast"></div>
+<div id="flash"></div>
 
 <!-- 실행 방식 설정: dashboard.py가 띄우면 live, GitHub Pages(고정 주소)면 auto -->
 <script src="config.js"></script>
@@ -1102,6 +1110,28 @@ $('dmaplist').addEventListener('click', async ev => {
     await api.post('/map/delete', {name: b.dataset.md}); loadDmaps();
   }
 });
+
+// ── 녹화용 시계 + 싱크 신호 (화면 녹화와 폰 영상을 나중에 자동으로 맞추기) ──
+function tickClock(){
+  const d = new Date(), p = n => String(n).padStart(2, '0');
+  $('clock').textContent = `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${Math.floor(d.getMilliseconds()/100)}`;
+}
+setInterval(tickClock, 50); tickClock();
+let actx = null;
+function beep(at, dur){                // 2kHz 사인파 (폰 마이크와 화면 녹화 소리 둘 다에 잘 잡히는 높이)
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.frequency.value = 2000; o.type = 'sine';
+  g.gain.setValueAtTime(0, at); g.gain.linearRampToValueAtTime(0.9, at + 0.005);
+  g.gain.setValueAtTime(0.9, at + dur - 0.01); g.gain.linearRampToValueAtTime(0, at + dur);
+  o.connect(g).connect(actx.destination); o.start(at); o.stop(at + dur + 0.02);
+}
+$('b-sync').onclick = () => {
+  actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+  const t0 = actx.currentTime + 0.1;
+  [0, 0.4, 0.8].forEach(dt => beep(t0 + dt, 0.15));          // 삐-삐-삐 (0.4초 간격) = 맞추는 표시
+  setTimeout(() => { $('flash').style.opacity = 1; setTimeout(() => $('flash').style.opacity = 0, 150); }, 100);
+  toast('🎬 싱크 신호! (삐-삐-삐) — 폰에도 소리가 들어갔는지 확인하세요');
+};
 
 // ── 3번: 말로 시키기 (Claude 에이전트) ──
 let agBusy = false, agShown = 0, agSpokenT = 0;
