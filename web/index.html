@@ -281,11 +281,13 @@
     <section class="card hidden" id="c-agent">
       <h2>말로 시키기 <span class="sub">(Claude)</span>
         <span class="acts">
+          <button class="btn" id="ear-btn" title="로봇 마이크로 들어요: 정해진 단어(인사·하트·엎드려·일어나·멈춰)는 바로 동작, '로봇아 ~'라고 부르면 Claude가 답하고 로봇이 말해요">🐕 로봇 귀</button>
           <button class="btn" id="kw-btn" title="켜 두면 정해진 단어만 듣고 바로 동작해요 (Claude 안 씀): 인사 · 하트 · 엎드려 · 일어나 · 멈춰">👂 단어 듣기</button>
           <label class="sub" title="Claude의 답을 소리로 읽어 줘요 (듣는 기능 아님)">🔊 답 읽기 <select id="ag-tts"><option value="">끔</option><option value="pc">노트북</option><option value="robot">🐕 로봇</option></select></label>
           <button class="btn" id="ag-reset" title="대화 새로 시작">새 대화</button></span>
       </h2>
       <div id="ag-log" class="aglog"><div class="agmsg sys">예) "문 앞으로 가서 하트하고 돌아와", "앞에 뭐 보여?", "여기를 책상으로 저장해"</div></div>
+      <div id="ear-bar" class="agmsg sys hidden" style="margin:0 12px 6px;border:1px solid var(--line)"></div>
       <div id="kw-bar" class="agmsg sys hidden" style="margin:0 12px 6px;border:1px solid var(--line)"></div>
       <div id="ag-places" class="agplaces"></div>
       <div class="aginput">
@@ -1202,6 +1204,29 @@ $('kw-btn').onclick = () => {
   kwOn = true; $('kw-btn').classList.add('listening'); $('kw-btn').textContent = '👂 듣는 중 · 끄기';
   kwShow('👂 듣는 중… "인사" "하트" "엎드려" "일어나" "멈춰" 만 알아들어요'); kwStart();
 };
+
+// 🐕 로봇 귀: 로봇 마이크로 듣기 (인식은 노트북 Whisper)
+let earOn = false, earTimer = null;
+async function earPoll(){
+  let s; try{ s = await (await fetch('/ear', {cache:'no-store'})).json(); }catch(e){ return; }
+  earOn = s.enabled;
+  $('ear-btn').classList.toggle('listening', earOn);
+  $('ear-btn').textContent = earOn ? '🐕 로봇 귀 · 끄기' : '🐕 로봇 귀';
+  $('ear-bar').classList.toggle('hidden', !earOn);
+  if(!earOn) return;
+  const bar = '▮'.repeat(Math.min(12, Math.round(s.level / 150))) || '·';
+  const heard = s.heard.length ? ` · 들은 말: "${esc(s.heard[s.heard.length - 1])}"` : '';
+  $('ear-bar').innerHTML = (s.receiving ? `🐕👂 ${esc(s.state)} <span style="opacity:.6">${bar}</span>` : '🐕👂 로봇 마이크 소리가 안 들어와요')
+    + heard + '<br><span style="opacity:.7">단어: 인사·하트·엎드려·일어나·멈춰 / 대화: "로봇아, 지금 몇 시야?"</span>';
+}
+$('ear-btn').onclick = async () => {
+  const j = await api.post('/ear', {on: !earOn});
+  if(j.ok === false) return toast(j.error);
+  if(!earOn) toast('🐕 로봇 귀 켬 — 처음엔 음성 인식 준비에 몇 십 초 걸릴 수 있어요');
+  earPoll();
+  clearInterval(earTimer); earTimer = setInterval(earPoll, 700);
+};
+earTimer = setInterval(earPoll, 1000);
 
 async function agPoll(){
   if(MODE !== 'live' || !D || !D.can_drive) return;

@@ -4,3 +4,4 @@ opencv-python
 numpy
 anthropic>=2.7
 edge-tts
+faster-whisper

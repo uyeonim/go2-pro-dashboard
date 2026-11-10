@@ -207,15 +207,16 @@ class RobotAgent:
         return "실패: 시간 초과"
 
     # ── 대화 ──
-    def ask(self, text):
-        """백그라운드에서 실행. 화면은 self.chat 을 계속 읽어감."""
+    def ask(self, text, on_reply=None):
+        """백그라운드에서 실행. 화면은 self.chat 을 계속 읽어감.
+        on_reply가 있으면 (로봇 마이크로 들은 말) 마지막 답을 on_reply(답)으로 넘김 → 로봇이 소리로 말함."""
         with self.lock:
             if self.busy:
                 return False
             self.busy = True
         self.cancel.clear()
-        self.chat.append({"role": "user", "text": text, "t": time.time()})
-        threading.Thread(target=self._run, args=(text,), daemon=True).start()
+        self.chat.append({"role": "user", "text": ("👂 " if on_reply else "") + text, "t": time.time()})
+        threading.Thread(target=self._run, args=(text, on_reply), daemon=True).start()
         return True
 
     def reset(self):
@@ -226,12 +227,15 @@ class RobotAgent:
     def stop(self):
         self.cancel.set()
 
-    def _run(self, text):
+    def _run(self, text, on_reply=None):
         try:
             if self.client is None:
                 self.client = anthropic.Anthropic()          # .env의 ANTHROPIC_API_KEY
             if len(self.history) > 40:                      # 너무 길어지면 새 대화로 (중간을 고치지 않음)
                 self.history = []
+            if on_reply:
+                text = ("[로봇 마이크로 들은 말 (음성 인식이라 글자가 조금 틀릴 수 있음). 네 마지막 답은 로봇 스피커로 "
+                        "자동으로 말해지니 say 도구는 쓰지 말고, 말로 듣기 좋게 1~2문장으로 짧게 답해.] " + text)
             self.history.append({"role": "user", "content": text})
             for _ in range(MAX_STEPS):
                 if self.cancel.is_set():
@@ -251,6 +255,8 @@ class RobotAgent:
                 if resp.stop_reason != "tool_use" or not calls:
                     reply = " ".join(b.text for b in resp.content if b.type == "text").strip()
                     self.chat.append({"role": "assistant", "text": reply or "(답 없음)", "t": time.time()})
+                    if on_reply and reply:
+                        on_reply(reply)
                     return
                 results = []
                 for c in calls:

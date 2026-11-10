@@ -32,6 +32,7 @@ from mapstack import MapStack
 from agent import RobotAgent
 from robotslam import RobotSlam
 import speech
+from hearing import RobotEar
 from navigator import Navigator
 from sensors import make_conn  # import 시 .env도 읽음
 from unitree_webrtc_connect import RTC_TOPIC, SPORT_CMD
@@ -395,6 +396,11 @@ def robot_thread(args):
                     sub(tp, lambda m, tp=tp: probe_msg(tp, m))
                 conn.video.switchVideoChannel(True)
                 conn.video.add_track_callback(on_track)
+                try:  # 로봇 마이크 소리 받기 (👂 로봇 귀)
+                    conn.audio.add_track_callback(ear.feed)
+                    conn.audio.switchAudioChannel(True)
+                except Exception as e:
+                    log(f"로봇 마이크 켜기 실패: {e!r}")
                 try:  # LiDAR 켜기 + 구독 (실패해도 영상/센서는 계속)
                     conn.datachannel.set_decoder(decoder_type="native")
                     await conn.datachannel.disableTrafficSaving(True)
@@ -1349,11 +1355,14 @@ def robot_say(text):
         if conn is None or loop is None or not state["connected"]:
             return "로봇이 연결돼 있지 않아요"
         t0 = time.time()
+        ear.mute_until = time.time() + 60          # 자기 목소리를 알아듣지 않게
         try:
             n = asyncio.run_coroutine_threadsafe(
                 speech.play_on_robot(conn.datachannel.pub_sub, wav, sec, log=log), loop).result(60 + sec)
         except Exception as e:
+            ear.mute_until = time.time() + 0.5
             return f"로봇 스피커로 보내기 실패: {e!r}"
+        ear.mute_until = time.time() + 0.7
         log(f"🗣 로봇이 말함 ({sec:.1f}초, {n}조각, {time.time() - t0:.1f}초 걸림): {text}")
         return None
     finally:
@@ -1391,28 +1400,94 @@ def direct_action():
     if not can_drive():
         return jsonify({"ok": False, "error": "노트북 화면에서만 할 수 있어요"}), 403
     name = str((request.get_json(silent=True) or {}).get("name", ""))
+    err, code = keyword_action(name)
+    return jsonify({"ok": True} if not err else {"ok": False, "error": err}), code
+
+
+def keyword_action(name):
+    """정해진 단어 동작 실행. (오류 또는 None, http 코드)"""
     if name == "stop":
         agent.stop()
         _stop_all()
         _sport_cmd("StopMove")
         log("👂 멈춰")
-        return jsonify({"ok": True})
+        return None, 200
     if name not in KEYWORD_ACTIONS:
-        return jsonify({"ok": False, "error": "허용하지 않은 동작이에요"}), 400
+        return "허용하지 않은 동작이에요", 400
     if not state["connected"]:
-        return jsonify({"ok": False, "error": "로봇이 연결돼 있지 않아요"}), 409
+        return "로봇이 연결돼 있지 않아요", 409
     if follower.active:      # 따라가는 중: 멈추고 → 동작 → 다시 따라가기 (엎드려는 '일어나' 할 때까지 쉼)
         kind = {"lie_down": "rest", "stand_up": "wake"}.get(name, "act")
         threading.Thread(target=follower.perform, args=(KEYWORD_ACTIONS[name], kind), daemon=True).start()
         log(f"👂 따라가는 중 단어 동작: {name}")
-        return jsonify({"ok": True, "during_follow": True})
+        return None, 200
     if nav.active or rslam.busy() or agent.busy:
-        return jsonify({"ok": False, "error": "로봇이 다른 일을 하는 중이에요"}), 409
+        return "로봇이 다른 일을 하는 중이에요", 409
     _sport_cmd(KEYWORD_ACTIONS[name])
     if name == "stand_up":   # 일어선 뒤 걸을 수 있는 상태로
         threading.Timer(1.5, lambda: _sport_cmd("BalanceStand")).start()
     log(f"👂 단어 동작: {name}")
-    return jsonify({"ok": True})
+    return None, 200
+
+
+# ── 👂 로봇 귀: 로봇 마이크로 듣고 반응 ──
+# 1) 정해진 단어는 바로 동작 (Claude 안 씀) — 화면의 👂 단어 듣기와 같은 단어
+# 2) "로봇아 …" 로 부르면 Claude에게 넘기고, 답을 로봇이 소리로 말함
+EAR_WORDS = [(re.compile(r"멈춰|그만|스톱|정지"), "stop"), (re.compile(r"엎드려|누워"), "lie_down"),
+             (re.compile(r"일어나|일어서"), "stand_up"), (re.compile(r"하트"), "heart"), (re.compile(r"인사|안녕"), "hello")]
+WAKE = re.compile(r"^(로봇|로보|로벗|멍멍|바둑)[아야이]?[,.!\s]*")
+ear_cfg = {"talk": True}       # 부르면 대화하기
+
+
+def _on_heard(text):
+    flat = re.sub(r"[\s,.!?]", "", text)
+    m = WAKE.match(text.strip())
+    if m and ear_cfg["talk"]:
+        rest = text.strip()[m.end():].strip()
+        if not rest:
+            threading.Thread(target=robot_say, args=("네, 말씀하세요.",), daemon=True).start()
+            return
+        if re.fullmatch(r"(멈춰|그만|스톱|정지)[요!.]*", re.sub(r"\s", "", rest)):
+            keyword_action("stop")
+            return
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            log("👂 .env에 ANTHROPIC_API_KEY가 없어서 대화 못 함")
+            return
+        if not agent.ask(rest, on_reply=lambda reply: robot_say(reply[:speech.MAX_CHARS])):
+            log("👂 아직 이전 명령을 하는 중")
+        return
+    for rx, name in EAR_WORDS:            # 짧은 말에서만 (긴 문장 속 단어로 잘못 움직이지 않게)
+        if rx.search(flat) and (name == "stop" or len(flat) <= 8):
+            err, _ = keyword_action(name)
+            if err:
+                log(f"👂 '{text}' → {name} 실패: {err}")
+            return
+
+
+ear = RobotEar(on_text=_on_heard, log=log)
+
+
+@app.route("/ear", methods=["GET", "POST"])
+def ear_api():
+    if request.method == "POST":
+        if not can_drive():
+            return jsonify({"ok": False, "error": "노트북 화면에서만 할 수 있어요"}), 403
+        j = request.get_json(silent=True) or {}
+        if "on" in j:
+            ear.enabled = bool(j["on"])
+            if ear.enabled:
+                ear.warmup()
+            log(f"👂 로봇 귀 {'켬' if ear.enabled else '끔'}")
+        if "talk" in j:
+            ear_cfg["talk"] = bool(j["talk"])
+    return jsonify({**ear.status(), "talk": ear_cfg["talk"]})
+
+
+@app.route("/ear/wav")
+def ear_wav():
+    if not can_drive():
+        return "노트북 화면에서만", 403
+    return Response(ear.wav(10), mimetype="audio/wav")
 
 
 @app.route("/agent/ask", methods=["POST"])
