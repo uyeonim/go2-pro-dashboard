@@ -1335,6 +1335,32 @@ agent = RobotAgent(robot={
 }, places_file=os.path.join(ROBOT_MAP_DIR, "places.json"), log=log)
 
 
+KEYWORD_ACTIONS = {"hello": "Hello", "heart": "FingerHeart", "lie_down": "StandDown", "stand_up": "StandUp"}
+
+
+@app.route("/action", methods=["POST"])
+def direct_action():
+    """👂 단어 듣기용: 정해진 동작만 바로 실행 (Claude 안 거침). stop은 모든 이동 정지."""
+    if not can_drive():
+        return jsonify({"ok": False, "error": "노트북 화면에서만 할 수 있어요"}), 403
+    name = str((request.get_json(silent=True) or {}).get("name", ""))
+    if name == "stop":
+        agent.stop()
+        _stop_all()
+        _sport_cmd("StopMove")
+        log("👂 멈춰")
+        return jsonify({"ok": True})
+    if name not in KEYWORD_ACTIONS:
+        return jsonify({"ok": False, "error": "허용하지 않은 동작이에요"}), 400
+    if not state["connected"]:
+        return jsonify({"ok": False, "error": "로봇이 연결돼 있지 않아요"}), 409
+    if nav.active or follower.active or rslam.busy() or agent.busy:
+        return jsonify({"ok": False, "error": "로봇이 다른 일을 하는 중이에요"}), 409
+    _sport_cmd(KEYWORD_ACTIONS[name])
+    log(f"👂 단어 동작: {name}")
+    return jsonify({"ok": True})
+
+
 @app.route("/agent/ask", methods=["POST"])
 def agent_ask():
     if not can_drive():

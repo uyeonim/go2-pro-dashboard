@@ -280,10 +280,13 @@
   <div class="side">
     <section class="card hidden" id="c-agent">
       <h2>말로 시키기 <span class="sub">(Claude)</span>
-        <span class="acts"><label class="sub" title="답을 소리로 읽어 줘요"><input type="checkbox" id="ag-tts"> 🔊</label>
+        <span class="acts">
+          <button class="btn" id="kw-btn" title="켜 두면 정해진 단어만 듣고 바로 동작해요 (Claude 안 씀): 인사 · 하트 · 엎드려 · 일어나 · 멈춰">👂 단어 듣기</button>
+          <label class="sub" title="Claude의 답을 소리로 읽어 줘요 (듣는 기능 아님)"><input type="checkbox" id="ag-tts"> 🔊 읽어주기</label>
           <button class="btn" id="ag-reset" title="대화 새로 시작">새 대화</button></span>
       </h2>
       <div id="ag-log" class="aglog"><div class="agmsg sys">예) "문 앞으로 가서 하트하고 돌아와", "앞에 뭐 보여?", "여기를 책상으로 저장해"</div></div>
+      <div id="kw-bar" class="agmsg sys hidden" style="margin:0 12px 6px;border:1px solid var(--line)"></div>
       <div id="ag-places" class="agplaces"></div>
       <div class="aginput">
         <button class="btn" id="ag-mic" title="눌러서 말하기 (크롬)">🎤</button>
@@ -1159,6 +1162,37 @@ $('ag-mic').onclick = () => {
   rec.onend = () => { rec = null; $('ag-mic').classList.remove('listening'); };
   rec.start();
 };
+// 👂 단어 듣기: 계속 들으면서 정해진 단어가 나오면 바로 동작 (Claude를 안 거쳐서 엉뚱하게 움직일 일이 없음)
+const KEYWORDS = [   // [들리면, 동작, 화면에 보일 말] — 앞쪽이 먼저 (멈춰가 제일 우선)
+  [/멈춰|그만|스톱|정지/, 'stop', '멈춰'], [/엎드려|누워/, 'lie_down', '엎드려'],
+  [/일어나|일어서/, 'stand_up', '일어나'], [/하트/, 'heart', '하트'], [/인사|안녕/, 'hello', '인사'],
+];
+let kwRec = null, kwOn = false, kwLast = 0;
+function kwShow(msg){ $('kw-bar').classList.toggle('hidden', !kwOn); if(kwOn) $('kw-bar').textContent = msg; }
+async function kwFire(text){
+  const hit = KEYWORDS.find(([re]) => re.test(text.replace(/\s/g, '')));
+  if(!hit) return kwShow(`👂 듣는 중… (들린 말: "${text}" → 해당 없음)`);
+  if(hit[1] !== 'stop' && Date.now() - kwLast < 3000) return;          // 같은 말이 겹쳐 들려도 3초에 한 번만
+  kwLast = Date.now();
+  const j = await api.post('/action', {name: hit[1]});
+  kwShow(j.ok ? `👂 "${text}" → ${hit[2]} ✅` : `👂 "${text}" → ${hit[2]} 실패: ${j.error}`);
+}
+function kwStart(){
+  if(!SR) { toast('이 브라우저는 음성 인식을 지원하지 않아요 (크롬을 써 주세요)'); return kwStop(); }
+  kwRec = new SR(); kwRec.lang = 'ko-KR'; kwRec.continuous = true; kwRec.interimResults = false;
+  kwRec.onresult = ev => { const r = ev.results[ev.results.length - 1]; if(r.isFinal) kwFire(r[0].transcript.trim()); };
+  kwRec.onerror = ev => { if(ev.error === 'not-allowed'){ toast('마이크 권한을 허용해 주세요'); kwStop(); } };
+  kwRec.onend = () => { if(kwOn) setTimeout(() => { try{ kwRec.start(); }catch(e){} }, 300); };   // 끊기면 다시 듣기
+  kwRec.start();
+}
+function kwStop(){ kwOn = false; if(kwRec){ kwRec.onend = null; try{ kwRec.stop(); }catch(e){} kwRec = null; }
+  $('kw-btn').classList.remove('listening'); $('kw-btn').textContent = '👂 단어 듣기'; kwShow(''); }
+$('kw-btn').onclick = () => {
+  if(kwOn) return kwStop();
+  kwOn = true; $('kw-btn').classList.add('listening'); $('kw-btn').textContent = '👂 듣는 중 · 끄기';
+  kwShow('👂 듣는 중… "인사" "하트" "엎드려" "일어나" "멈춰" 만 알아들어요'); kwStart();
+};
+
 async function agPoll(){
   if(MODE !== 'live' || !D || !D.can_drive) return;
   let s; try{ s = await (await fetch('/agent/state', {cache:'no-store'})).json(); }catch(e){ return; }
