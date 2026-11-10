@@ -25,8 +25,8 @@ from navigator import plan
 HERE = os.path.dirname(os.path.abspath(__file__))
 YUNET = os.path.join(HERE, "models", "face_detection_yunet_2023mar.onnx")
 
-MAX_V, MAX_W = 1.2, 1.5  # 걷는 사람(~1.2m/s) 따라잡을 수 있게
-STALE = 0.6              # 리모컨 값이 이보다 오래되면 정지
+MAX_V, MAX_W = 1.2, 1.0  # 걷는 사람(~1.2m/s) 따라잡을 수 있게 / 회전은 너무 빠르면 UWB 지연 때문에 휘청임
+STALE = 1.0              # 리모컨 값이 이보다 오래되면 정지
 TURN_FIRST = 0.6         # 방향이 이보다 틀어지면 제자리에서 먼저 돌기 (rad, 약 34°)
 FRONT_STOP = 0.5         # 바로 앞 장애물 거리 (m)
 CAM_HFOV = math.radians(100)   # 카메라 가로 화각 (대략)
@@ -128,6 +128,7 @@ class Follower:
         self.get_pose, self.get_live = get_pose, get_live_obstacles
         self.get_obstacles = get_obstacles or get_live_obstacles   # 길 찾기용 (지금 보이는 점 + 쌓은 지도)
         self._plan, self._plan_t = None, 0.0
+        self._last_vx = 0.0
         self.get_jpeg = get_jpeg
         self.send_move, self.send_stop, self.send_action, self.log = send_move, send_stop, send_action, log
         self.filter = UwbFilter()
@@ -149,14 +150,24 @@ class Follower:
 
     # ── 외부에서 ──
     def feed_uwb(self, d):
+        """방향은 '지도 기준 방향'(로봇 yaw + 측정값)으로 바꿔서 거름.
+        → 로봇이 도는 동안 UWB 값이 늦게 따라와도(지연) 로봇 자신의 회전은 바로 반영돼서 덜 흔들림."""
+        p = self.get_pose()
+        if p is None:
+            return
+        try:
+            d = dict(d, orientation_est=wrap(p[2] + self.sign * float(d["orientation_est"])))
+        except (KeyError, TypeError, ValueError):
+            return
         self.filter.update(d)
 
     def remote(self):
-        """(거리, 로봇 기준 방향[부호 보정됨], 받은 시각) 또는 None"""
+        """(거리, 로봇 기준 방향, 받은 시각) 또는 None"""
         g = self.filter.get()
-        if not g:
+        p = self.get_pose()
+        if not g or p is None:
             return None
-        return g[0], self.sign * g[1], g[2]
+        return g[0], wrap(g[1] - p[2]), g[2]
 
     def status(self):
         r = self.remote()
@@ -218,6 +229,8 @@ class Follower:
                         self.msg = "리모컨 신호가 없어요 — 리모컨을 켜고 로봇 근처에서 들어 주세요"
                     continue
                 dist, b, _ = r
+                # UWB 거리는 약 0.4초 늦게 옴 → 그동안 우리가 앞으로 간 만큼 빼서 예측 (지나치게 다가가는 것 방지)
+                dist = dist - 0.4 * self._last_vx
                 err = dist - self.dist_goal
                 head = b                                   # 향할 방향 (기본: 사람 쪽)
                 state = "따라가는 중"
@@ -229,7 +242,7 @@ class Follower:
                         state = "장애물 돌아가는 중"
                 else:
                     self._plan = None
-                vyaw = clip(1.8 * head, -MAX_W, MAX_W)
+                vyaw = clip(1.2 * head, -MAX_W, MAX_W)
                 if abs(head) > TURN_FIRST:
                     vx = 0.0
                     state = f"방향 맞추는 중 ({math.degrees(head):+.0f}°)" if state == "따라가는 중" else state
@@ -248,6 +261,7 @@ class Follower:
                     vx = 0.0
                     self._plan_t = 0.0                      # 바로 다시 길 찾기
                     state = "앞에 장애물 — 돌아갈 길 찾는 중"
+                self._last_vx = vx
                 if vx == 0 and vyaw == 0:
                     self.send_stop()
                 else:
@@ -275,10 +289,12 @@ class Follower:
         along = dx * ux + dy * uy
         side = -dx * uy + dy * ux
         blocked = ((along > 0.45) & (along < dist - 0.6) & (np.abs(side) < 0.3)).sum() >= 3
-        if not blocked:
+        if blocked:
+            self._blocked_t = now
+        elif now - getattr(self, "_blocked_t", 0.0) > 2.0:          # 막힘이 풀리고 2초 지나야 직진으로 (왔다갔다 방지)
             self._plan = None
             return None
-        if self._plan is None or now - self._plan_t > 1.0:            # 1초마다 다시 계산
+        if self._plan is None or now - self._plan_t > 2.0:            # 2초마다 다시 계산
             path, _ = plan(obs, (p[0], p[1]), (gx, gy))
             self._plan, self._plan_t = (path[1:] if path else None), now
         if not self._plan:
