@@ -763,18 +763,53 @@ def index():
     return send_from_directory("web", "index.html")
 
 
+def is_remote():
+    """공개 주소(Tailscale Funnel/Cloudflare)로 들어온 요청인지. 공개 경로는 대역폭이 작아서(초당 ~50KB) 가볍게 보냄."""
+    if request.remote_addr not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+        return True
+    return any(h in request.headers for h in ("X-Forwarded-For", "Forwarded", "Cf-Connecting-Ip"))
+
+
+REMOTE_W, REMOTE_Q, REMOTE_FPS = 480, 45, 4      # 원격 화면용: 작게·낮은 화질·초당 4장 (~15KB/장)
+_low = {"t": None, "jpg": None}
+_low_lock = threading.Lock()
+
+
+def low_jpeg():
+    """최신 프레임의 가벼운 버전 (프레임마다 한 번만 다시 인코딩)."""
+    with _frame_lock:
+        jpg, t = _latest_jpeg[0], _latest_t[0]
+    if jpg is None:
+        return None, t
+    with _low_lock:
+        if _low["t"] != t:
+            img = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
+            h, w = img.shape[:2]
+            img = cv2.resize(img, (REMOTE_W, int(h * REMOTE_W / w)), interpolation=cv2.INTER_AREA)
+            _low.update(t=t, jpg=cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, REMOTE_Q])[1].tobytes())
+        return _low["jpg"], t
+
+
 @app.route("/video")
 def video():
-    """새 프레임이 생기면 바로 밀어 보내는 스트림 (멀티파트 JPEG)."""
+    """새 프레임이 생기면 바로 밀어 보내는 스트림 (멀티파트 JPEG). 원격 화면은 작고 느리게."""
     def part(jpg):
         return b"--f\r\nContent-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n"
+
+    remote = is_remote()
 
     def gen():
         last_t, last_sent = -1.0, 0.0
         while True:
-            with _frame_lock:
-                jpg, t = _latest_jpeg[0], _latest_t[0]
+            if remote:
+                jpg, t = low_jpeg()
+            else:
+                with _frame_lock:
+                    jpg, t = _latest_jpeg[0], _latest_t[0]
             now = time.time()
+            if remote and now - last_sent < 1 / REMOTE_FPS:
+                time.sleep(0.02)
+                continue
             if jpg is not None and t != last_t:
                 last_t, last_sent = t, now
                 yield part(jpg)
@@ -792,8 +827,11 @@ def video():
 @app.route("/frame")
 def frame():
     """최신 카메라 사진 한 장."""
-    with _frame_lock:
-        jpg, t = _latest_jpeg[0], _latest_t[0]
+    if is_remote():
+        jpg, t = low_jpeg()
+    else:
+        with _frame_lock:
+            jpg, t = _latest_jpeg[0], _latest_t[0]
     r = Response(jpg or PLACEHOLDER, mimetype="image/jpeg")
     r.headers["Cache-Control"] = "no-store"
     r.headers["X-Frame-Age"] = f"{time.time() - t:.2f}" if t else "-1"
@@ -885,9 +923,13 @@ def data():
 def lidar():
     p = _pose()                     # 지도 좌표 (스캔 정합 보정)
     tr = state["trail"]
-    step = max(1, len(tr) // 1000)  # 화면용으로 최대 ~1000점
+    remote = is_remote()
+    step = max(1, len(tr) // (300 if remote else 1000))  # 화면용으로 최대 ~1000점 (원격 300)
+    pts = state["lidar"]
+    if remote and len(pts) > 1200:  # 원격은 점을 줄여서 보냄
+        pts = pts[:: len(pts) // 1200 + 1]
     return jsonify({
-        "points": state["lidar"],
+        "points": pts,
         "age": round(time.time() - state["lidar_t"], 1) if state["lidar_t"] else None,
         "robot": [p[0], p[1]] if p else None,
         "yaw": p[2] if p else None,

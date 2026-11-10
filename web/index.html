@@ -314,8 +314,9 @@ const LiveAPI = {
       }catch(e){}
       setTimeout(loop, 800);
     }
-    // 서버는 최소 1초마다 프레임을 보내므로 3초간 없으면 스트림이 멈춘 것
-    setInterval(() => { if(Date.now() - last > 3000 && ctrl) ctrl.abort(); }, 1000);
+    // 서버는 최소 1초마다 프레임을 보내므로 오래 없으면 스트림이 멈춘 것
+    // (공개 주소는 느려서 첫 장이 몇 초 걸릴 수 있음 → 더 오래 기다림)
+    setInterval(() => { if(Date.now() - last > (IS_LOCAL ? 3000 : 12000) && ctrl) ctrl.abort(); }, 1000);
     loop();
   },
 };
@@ -596,9 +597,10 @@ async function lidarTick(){
     const L = await api.lidar();
     if(L.stack){                                          // 쌓은 지도: 바뀌었을 때만 새로 받음
       renderDmapInfo(L.stack);
-      if(L.stack.version !== stack.version && !stack.loading){
+      if(L.stack.version !== stack.version && !stack.loading &&
+         (IS_LOCAL || !stack.fetchedAt || Date.now() - stack.fetchedAt > 10000)){   // 원격은 10초에 한 번만
         stack.loading = true;
-        try{ const c = await (await fetch('/map/cells', {cache:'no-store'})).json(); stack = c; }
+        try{ const c = await (await fetch('/map/cells', {cache:'no-store'})).json(); c.fetchedAt = Date.now(); stack = c; }
         finally{ stack.loading = false; }
       }
     }
@@ -897,9 +899,10 @@ $('b-recheck').onclick = async () => {
 };
 
 function start(){
-  setInterval(tick, 250); tick();
+  const slow = MODE === 'live' && !IS_LOCAL;   // 공개 주소로 보는 중: 대역폭이 작아서 덜 자주 받음
+  setInterval(tick, slow ? 1000 : 250); tick();
   if(MODE === 'demo') setupDemoVideos();
-  setInterval(lidarTick, 500); lidarTick();
+  setInterval(lidarTick, slow ? 1500 : 500); lidarTick();
   if(!camVid) api.startCamera(showFrame);
   startFpsLabel();
   loadRecordings();
