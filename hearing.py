@@ -15,11 +15,15 @@ import numpy as np
 
 RATE = 16000
 FRAME = 320                  # 20ms
-START_RATIO = 3.0            # 소음보다 이만큼 크면 말소리
-MIN_RMS = 250                # 이보다 작으면 말소리 아님 (16bit)
-END_SIL = 0.8                # 이만큼 조용하면 말 끝
+START_RATIO = 2.5            # 소음보다 이만큼 크면 말소리
+MIN_RMS = 40                 # 말소리 대역(300~3400Hz) 크기가 이보다 작으면 말소리 아님
+END_SIL = 0.7                # 이만큼 조용하면 말 끝
 MIN_SPEECH = 0.35            # 너무 짧은 소리는 버림
-MAX_SPEECH = 8.0
+MAX_SPEECH = 6.0
+# 로봇 마이크는 소리가 작고 팬 소리(낮은 소리)가 커서, 말소리 대역만 보고 판단
+_F = np.fft.rfftfreq(FRAME, 1 / RATE)
+_BAND = (_F >= 300) & (_F <= 3400)
+_WIN = np.hanning(FRAME)
 MODEL = "small"              # faster-whisper 모델 (small: 한국어 괜찮음, CPU에서도 1~2초)
 
 
@@ -29,7 +33,7 @@ class RobotEar:
         self.enabled = False
         self.mute_until = 0.0
         self.level = 0.0               # 지금 소리 크기 (화면 표시용)
-        self.noise = 300.0             # 주변 소음 크기 추정
+        self.noise = 60.0              # 주변 소음 크기 추정 (말소리 대역)
         self.frames_t = 0.0            # 마지막으로 소리 받은 시각
         self.heard = collections.deque(maxlen=20)   # [(t, text)]
         self.state = "꺼짐"
@@ -58,7 +62,8 @@ class RobotEar:
             self._frame(fr)
 
     def _frame(self, fr):
-        rms = float(np.sqrt(np.mean(fr.astype(np.float32) ** 2)))
+        sp = np.fft.rfft(fr.astype(np.float32) * _WIN)
+        rms = float(np.sqrt((np.abs(sp[_BAND]) ** 2).sum() * 2) / FRAME)
         self.level = 0.8 * self.level + 0.2 * rms
         muted = time.time() < self.mute_until
         if not self.enabled or muted:
@@ -71,7 +76,7 @@ class RobotEar:
                 self.noise = 0.98 * self.noise + 0.02 * rms
             self._pre.append(fr)
             self._loud = self._loud + 1 if loud else 0
-            if self._loud >= 5:                # 0.1초 넘게 큰 소리 → 말 시작
+            if self._loud >= 6:                # 0.12초 넘게 큰 소리 → 말 시작
                 self._speech, self._quiet = list(self._pre), 0
                 self.state = "말소리 듣는 중…"
             elif self.state != "알아듣는 중…":
@@ -96,7 +101,7 @@ class RobotEar:
             t0 = time.time()
             try:
                 self._model = WhisperModel(MODEL, device="cuda", compute_type="float16")
-                self._model.transcribe(np.zeros(RATE, np.float32), language="ko")   # GPU 실제로 되는지
+                list(self._model.transcribe(np.random.randn(RATE).astype(np.float32) * 0.01, language="ko")[0])
                 dev = "GPU"
             except Exception:
                 self._model = WhisperModel(MODEL, device="cpu", compute_type="int8")
@@ -112,15 +117,32 @@ class RobotEar:
                 speech = self._q.popleft()
             try:
                 t0 = time.time()
-                segs, _ = self._load().transcribe(
-                    speech.astype(np.float32) / 32768.0, language="ko", beam_size=1, vad_filter=False,
-                    condition_on_previous_text=False, no_speech_threshold=0.6)
-                text = " ".join(s.text.strip() for s in segs if s.no_speech_prob < 0.6).strip()
+                x = speech.astype(np.float32) / 32768.0
+                X = np.fft.rfft(x)                       # 200Hz 아래(팬 소리) 지우기
+                X[np.fft.rfftfreq(len(x), 1 / RATE) < 200] = 0
+                x = np.fft.irfft(X, len(x)).astype(np.float32)
+                x = x * min(30.0, 0.7 / max(1e-4, float(np.abs(x).max())))     # 작은 소리 키우기
+                self._save(x)
+                try:
+                    segs = list(self._load().transcribe(
+                        x, language="ko", beam_size=5, vad_filter=False,
+                        condition_on_previous_text=False, no_speech_threshold=0.8)[0])
+                except RuntimeError as e:            # GPU 라이브러리 없음 등 → CPU로 바꿔서 다시
+                    from faster_whisper import WhisperModel
+                    self.log(f"👂 GPU 인식 실패 → CPU로: {e}")
+                    self._model = WhisperModel(MODEL, device="cpu", compute_type="int8")
+                    segs = list(self._model.transcribe(
+                        x, language="ko", beam_size=5, vad_filter=False,
+                        condition_on_previous_text=False, no_speech_threshold=0.8)[0])
+                text = " ".join(s.text.strip() for s in segs if s.no_speech_prob < 0.8).strip()
+                raw = " | ".join(f"{s.text.strip()}({s.no_speech_prob:.2f})" for s in segs)
+                self.log(f"👂 소리 {len(speech) / RATE:.1f}초 → 인식: {raw or '(없음)'}")
             except Exception as e:
                 self.log(f"👂 음성 인식 오류: {e!r}")
                 continue
-            if self.state == "알아듣는 중…":
-                self.state = "듣는 중"
+            finally:
+                if self.state == "알아듣는 중…":
+                    self.state = "듣는 중"
             if not text or _junk(text):
                 continue
             self.heard.append((time.time(), text))
@@ -129,6 +151,16 @@ class RobotEar:
                 self.on_text(text)
             except Exception as e:
                 self.log(f"👂 처리 오류: {e!r}")
+
+    def _save(self, x):
+        """확인용: 마지막 말소리 몇 개를 logs/ear/ 에 저장"""
+        import os
+        d = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "ear")
+        os.makedirs(d, exist_ok=True)
+        self._n = (getattr(self, "_n", 0) + 1) % 10
+        with wave.open(os.path.join(d, f"heard_{self._n}.wav"), "wb") as w:
+            w.setnchannels(1), w.setsampwidth(2), w.setframerate(RATE)
+            w.writeframes((np.clip(x, -1, 1) * 32767).astype(np.int16).tobytes())
 
     def warmup(self):
         threading.Thread(target=self._load, daemon=True).start()

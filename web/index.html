@@ -1214,7 +1214,7 @@ async function earPoll(){
   $('ear-btn').textContent = earOn ? '🐕 로봇 귀 · 끄기' : '🐕 로봇 귀';
   $('ear-bar').classList.toggle('hidden', !earOn);
   if(!earOn) return;
-  const bar = '▮'.repeat(Math.min(12, Math.round(s.level / 150))) || '·';
+  const bar = '▮'.repeat(Math.min(12, Math.round(s.level / 40))) || '·';
   const heard = s.heard.length ? ` · 들은 말: "${esc(s.heard[s.heard.length - 1])}"` : '';
   $('ear-bar').innerHTML = (s.receiving ? `🐕👂 ${esc(s.state)} <span style="opacity:.6">${bar}</span>` : '🐕👂 로봇 마이크 소리가 안 들어와요')
     + heard + '<br><span style="opacity:.7">단어: 인사·하트·엎드려·일어나·멈춰 / 대화: "로봇아, 지금 몇 시야?"</span>';
